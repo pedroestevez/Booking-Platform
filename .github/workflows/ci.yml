@@ -1,0 +1,150 @@
+name: CI
+
+# Runs the quality gate on every pull request and on pushes to main.
+# Four checks must pass before a change is considered safe to merge:
+#   1. lint      — ESLint catches style issues and common mistakes
+#   2. typecheck — TypeScript verifies types line up across the codebase
+#   3. test      — Vitest runs the unit + integration suite
+#   4. build     — `next build` compiles the whole app the way production will
+#
+# lint/typecheck/build need no secrets: the app's pages are server-rendered on
+# demand, so the build never contacts a live database.
+#
+# ── Hermetic test database (ALI-114) ─────────────────────────────────────────
+# The `quality` job runs a throwaway `postgres:16` service container. Before
+# the Test step, `db:migrate` applies every `supabase/migrations/*.sql` file
+# from scratch (so a broken or out-of-order migration fails CI) and `db:seed`
+# creates one tenant (`e2e-test-tenant`) with availability wide enough that a
+# bookable slot exists whatever day CI runs. `TEST_DATABASE_URL` then points
+# the Test step's Supabase test harness (`src/test/supabase-harness.ts`) at
+# that database, so its three DB-backed tests run for real instead of
+# self-skipping. Nothing here needs a secret — `POSTGRES_USER`/`PASSWORD`/`DB`
+# are fixed, throwaway values — so a fork PR runs the full suite.
+#
+# This does NOT extend to the Playwright e2e job below. The app talks to
+# Supabase exclusively through `@supabase/supabase-js`, i.e. over PostgREST
+# (see `src/lib/supabase/server.ts`) — never a raw Postgres wire connection. A
+# `postgres:16` service container has no PostgREST in front of it, so the
+# running app cannot query it through the Supabase client; only tools that
+# speak raw Postgres directly (this workflow's migrate/seed scripts, and the
+# `pg`-based test harness) can use it. Standing up PostgREST (or the full
+# Supabase CLI stack) is out of scope for this issue — see ALI-114's "why it
+# changed" note. The e2e job below is therefore left on its existing path:
+# gated on repository secrets pointing at a real Supabase preview project.
+#
+# End-to-end tests are a separate job because they need a live tenant. They run
+# only when the E2E_TENANT_SLUG repository variable is set — an honest skip
+# rather than a false green.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same branch cancels the previous in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint, typecheck, test & build
+    runs-on: ubuntu-latest
+    # A throwaway Postgres — created and destroyed with the job, never
+    # reachable outside it. No secret backs any of these values.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Apply database migrations
+        run: npm run db:migrate
+
+      - name: Seed test tenant
+        run: npm run db:seed
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  e2e:
+    name: End-to-end (Playwright)
+    runs-on: ubuntu-latest
+    needs: quality
+    # ALI-114: this job is unchanged by the hermetic-database work above.
+    # `quality`'s postgres:16 service container is plain Postgres with no
+    # PostgREST in front of it; the running app only ever speaks to Supabase
+    # via `@supabase/supabase-js` (PostgREST), so it cannot be pointed at that
+    # container. Standing up PostgREST/the Supabase CLI stack to bridge that
+    # gap is new infrastructure this issue deliberately doesn't take on (see
+    # the "why it changed" note on ALI-114). This job therefore still targets
+    # a real Supabase preview project via repository secrets, same as before.
+    #
+    # Repository variable, not a secret: a slug is not sensitive, and secrets
+    # are not readable in a job-level `if`.
+    if: ${{ vars.E2E_TENANT_SLUG != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run end-to-end tests
+        run: npm run test:e2e
+        env:
+          E2E_TENANT_SLUG: ${{ vars.E2E_TENANT_SLUG }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

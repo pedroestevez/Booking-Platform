@@ -1,0 +1,135 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Design tokens. The neutral system palette is fixed; the *brand* accent is
+ * tenant-driven — each tenant sets `--brand` / `--brand-foreground` at the
+ * root of its booking flow (see TenantThemeProvider), so the same components
+ * render in any customer's colors without a rebuild.
+ */
+:root {
+  --radius: 0.75rem;
+
+  --background: oklch(0.99 0.002 286);
+  --foreground: oklch(0.21 0.006 286);
+
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.21 0.006 286);
+
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.21 0.006 286);
+
+  /* Brand accent — overridden per tenant at runtime. Default: indigo. */
+  --brand: oklch(0.52 0.21 277);
+  --brand-foreground: oklch(0.98 0.003 286);
+
+  --primary: var(--brand);
+  --primary-foreground: var(--brand-foreground);
+
+  --secondary: oklch(0.967 0.001 286);
+  --secondary-foreground: oklch(0.21 0.006 286);
+
+  --muted: oklch(0.967 0.001 286);
+  --muted-foreground: oklch(0.552 0.014 286);
+
+  --accent: oklch(0.967 0.001 286);
+  --accent-foreground: oklch(0.21 0.006 286);
+
+  --destructive: oklch(0.577 0.245 27.3);
+  --destructive-foreground: oklch(0.98 0.003 286);
+
+  --border: oklch(0.92 0.004 286);
+  --input: oklch(0.92 0.004 286);
+  --ring: var(--brand);
+}
+
+.dark {
+  --background: oklch(0.17 0.005 285);
+  --foreground: oklch(0.98 0.003 286);
+
+  --card: oklch(0.21 0.006 286);
+  --card-foreground: oklch(0.98 0.003 286);
+
+  --popover: oklch(0.21 0.006 286);
+  --popover-foreground: oklch(0.98 0.003 286);
+
+  --brand: oklch(0.62 0.19 277);
+  --brand-foreground: oklch(0.98 0.003 286);
+
+  --primary: var(--brand);
+  --primary-foreground: var(--brand-foreground);
+
+  --secondary: oklch(0.274 0.006 286);
+  --secondary-foreground: oklch(0.98 0.003 286);
+
+  --muted: oklch(0.274 0.006 286);
+  --muted-foreground: oklch(0.705 0.015 286);
+
+  --accent: oklch(0.274 0.006 286);
+  --accent-foreground: oklch(0.98 0.003 286);
+
+  --destructive: oklch(0.704 0.191 22.2);
+  --destructive-foreground: oklch(0.98 0.003 286);
+
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: var(--brand);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+}
+
+@layer utilities {
+  /* Subtle, premium texture used behind the booking shell. */
+  .bg-mesh {
+    background-image:
+      radial-gradient(at 0% 0%, color-mix(in oklch, var(--brand) 14%, transparent) 0px, transparent 50%),
+      radial-gradient(at 100% 0%, color-mix(in oklch, var(--brand) 9%, transparent) 0px, transparent 55%),
+      radial-gradient(at 100% 100%, color-mix(in oklch, var(--brand) 7%, transparent) 0px, transparent 50%);
+  }
+}
