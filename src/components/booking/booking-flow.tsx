@@ -88,8 +88,13 @@ export function BookingFlow({
 
     // Persist the booking: resolves-or-creates the guest identity and reserves
     // the slot (status 'pending'). Payment + invite arrive with Stripe (ALI-27).
+    //
+    // The tenant is identified by its public **slug**, not by `tenant.id`: the
+    // server re-resolves the slug against the database and scopes every write
+    // to what it finds (ALI-139). Sending the id would be sending the server a
+    // conclusion instead of a question.
     const result = await createBookingAction({
-      customerId: tenant.id,
+      customerSlug: tenant.slug,
       serviceId: service.id,
       slot,
       guest: details,

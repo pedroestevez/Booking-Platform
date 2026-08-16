@@ -21,6 +21,17 @@ import type { Booking, CreateBookingInput } from "@/lib/types";
  * inserts a `status='pending'` booking referencing `end_customer_id` and storing
  * per-vertical `custom_fields`. No payment here — Stripe lands with ALI-27.
  *
+ * ## `input.customerId` must already be server-resolved (ALI-139)
+ *
+ * Every query below runs through `createServiceRoleClient()`, which bypasses
+ * RLS, and each is scoped only by the `customerId` it is handed — the services
+ * lookup, the three availability reads, the identity RPC, and the insert. That
+ * makes this parameter the sole tenant boundary for six statements, so it must
+ * come from `getTenantBySlug` (public flow) or a `tenant_members` lookup
+ * (admin), and never from a request payload. `createBookingAction` is where
+ * that resolution happens for the guest flow; the app-code `customer_id`
+ * filters here are the mandated second layer, not the first.
+ *
  * Two layers guard the slot, and they are not interchangeable (ALI-98):
  *
  *   • The availability re-check below is **UX**. It catches the common case
