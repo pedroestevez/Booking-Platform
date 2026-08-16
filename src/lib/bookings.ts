@@ -19,9 +19,19 @@ import type { Booking, CreateBookingInput } from "@/lib/types";
  *
  * Resolves-or-creates the guest's identity (`end_customers`) by email, then
  * inserts a `status='pending'` booking referencing `end_customer_id` and storing
- * per-vertical `custom_fields`. No payment here — Stripe + an atomic
- * slot-collision constraint land with ALI-27. The collision check below is a
- * best-effort re-validation against current availability.
+ * per-vertical `custom_fields`. No payment here — Stripe lands with ALI-27.
+ *
+ * Two layers guard the slot, and they are not interchangeable (ALI-98):
+ *
+ *   • The availability re-check below is **UX**. It catches the common case
+ *     (a stale client picking a slot taken minutes ago) and produces a good
+ *     message, but it is a read-check-then-write and two concurrent requests
+ *     can both pass it.
+ *   • The `bookings_no_overlap` exclusion constraint (migration 0006) is the
+ *     **correctness guarantee**. The loser of a real race is rejected by
+ *     Postgres with SQLSTATE 23P01, which the insert path below translates
+ *     into the same message the re-check produces, so the two paths are
+ *     indistinguishable to the guest.
  */
 export async function createBooking(
   input: CreateBookingInput,
@@ -94,6 +104,17 @@ export async function createBooking(
     )
     .single<BookingRow>();
 
-  if (insertError) throw insertError;
+  if (insertError) {
+    // 23P01 = exclusion_violation: `bookings_no_overlap` rejected this insert
+    // because another booking already holds an overlapping window for this
+    // tenant. That is the race the pre-check cannot win, and it is the ONLY
+    // code translated here — anything else (a foreign-key violation, a lost
+    // connection, an RLS denial) must propagate untouched rather than be
+    // disguised as "pick another time".
+    if (insertError.code === "23P01") {
+      throw new Error("Sorry, that time was just taken. Please pick another.");
+    }
+    throw insertError;
+  }
   return mapBooking(booking);
 }
