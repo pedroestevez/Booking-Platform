@@ -27,12 +27,58 @@
 -- ║ and lets every other error propagate unchanged — a real fault must       ║
 -- ║ never be disguised as a scheduling message.                              ║
 -- ║                                                                          ║
--- ║ Forward-only: `add constraint` has no `if not exists` form, so this      ║
--- ║ file is applied once against a database that does not already carry      ║
--- ║ `bookings_no_overlap`.                                                   ║
+-- ║ The read side must agree with this predicate: `getUpcomingBookings` in   ║
+-- ║ `src/lib/tenants.ts` subtracts `status <> 'cancelled'` bookings from the ║
+-- ║ slot grid. If it filtered to a narrower set, the difference would render ║
+-- ║ as bookable ghost slots that the constraint then rejects at submit time. ║
+-- ║ That equality is asserted in `booking-overlap.db.test.ts` (criterion 8). ║
 -- ╚══════════════════════════════════════════════════════════════════════════╝
 
--- ── Before applying to a database that already holds bookings ─────────────
+-- ── How to apply this file ───────────────────────────────────────────────────
+-- Apply it as ONE transaction, and only via:
+--
+--   npm run db:migrate         (scripts/apply-migrations.mjs wraps each file
+--                              in begin/commit and aborts the run on error)
+--   psql -1 -f 0006_booking_overlap_constraint.sql
+--
+-- Never paste the statements in one at a time, and never run them through a
+-- console that autocommits per statement. The "no partial state" guarantee
+-- below is a property of the transaction, not of the statements: applied
+-- separately, `create extension` can commit while `add constraint` fails, and
+-- the database is left half-migrated.
+--
+-- This file deliberately does NOT contain its own `begin;` / `commit;`. The
+-- migration runner already opens a transaction per file, so an inner `begin`
+-- would be a no-op warning and the inner `commit` would end the runner's
+-- transaction early — defeating the very guarantee it looks like it adds.
+
+-- ── Idempotency and rollback ─────────────────────────────────────────────────
+-- `add constraint` has no `if not exists` form, so the guard below checks
+-- pg_constraint first. That keeps `npm run db:migrate` re-runnable against a
+-- database that already carries the constraint, and it means a half-applied
+-- file (see above) heals itself on the next run instead of erroring forever.
+--
+-- To roll back:
+--
+--   alter table public.bookings drop constraint bookings_no_overlap;
+--
+-- Leave the extension in place. `drop extension btree_gist` would CASCADE to
+-- the constraint's GiST index and drop the constraint with it — a much wider
+-- blast radius than intended, and it breaks any other btree_gist user.
+
+-- ── Locking: this is not an online migration ─────────────────────────────────
+-- `add constraint ... exclude` takes an ACCESS EXCLUSIVE lock on `bookings`
+-- and holds it while it builds the GiST index and validates every existing
+-- row. Reads and writes to `bookings` block for the duration. Postgres has no
+-- `concurrently` path for EXCLUDE constraints, so this cannot be avoided —
+-- only scheduled.
+--
+-- Apply during low traffic, and keep `lock_timeout` set (below) so the
+-- statement fails fast rather than queueing behind a long-running transaction
+-- while every booking request piles up behind it. A timeout is SQLSTATE 55P03;
+-- the transaction rolls back and the migration can simply be retried.
+
+-- ── Before applying to a database that already holds bookings ────────────────
 -- `alter table … add constraint` validates every existing row. If any overlap
 -- is already stored, the statement fails with 23P01 and the schema is left
 -- unchanged — there is no partial state, so rolling back is a no-op. Run the
@@ -48,13 +94,45 @@
 --    and a.status <> 'cancelled'
 --    and b.status <> 'cancelled'
 --    and tstzrange(a.start_time, a.end_time) && tstzrange(b.start_time, b.end_time);
+--
+-- !! A zero-row result is only trustworthy if the reading role can see every
+-- row. `bookings` has FORCE row level security and its policies key off the
+-- `app.current_customer_id` GUC (see 0002). A role without BYPASSRLS, with no
+-- GUC set, reads ZERO rows from a table full of overlaps — a false all-clear
+-- that sends you straight into a failed ALTER. Establish visibility first:
+--
+--   select current_user,
+--          (select rolbypassrls from pg_roles where rolname = current_user);
+--
+-- and/or run a positive control that MUST be non-zero on a populated database:
+--
+--   select count(*) from public.bookings;
+--
+-- If the count is zero on a database you know has bookings, you are reading
+-- through RLS: reconnect as a BYPASSRLS role (or the table owner) and re-run.
+-- `booking-overlap.db.test.ts` asserts the detection query does surface a
+-- known-dirty pair, so a silently-always-empty query fails the suite.
+
+-- Fail fast instead of queueing behind a long transaction while `bookings` is
+-- locked. `local` scopes it to this migration's transaction.
+set local lock_timeout = '3s';
 
 -- Equality on a scalar column inside a GiST index. Not installed by 0001.
 create extension if not exists btree_gist;
 
-alter table public.bookings
-  add constraint bookings_no_overlap
-  exclude using gist (
-    customer_id with =,
-    tstzrange(start_time, end_time) with &&
-  ) where (status <> 'cancelled');
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'bookings_no_overlap'
+      and conrelid = 'public.bookings'::regclass
+  ) then
+    alter table public.bookings
+      add constraint bookings_no_overlap
+      exclude using gist (
+        customer_id with =,
+        tstzrange(start_time, end_time) with &&
+      ) where (status <> 'cancelled');
+  end if;
+end
+$$;

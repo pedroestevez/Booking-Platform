@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { SLOT_FREEING_STATUS } from "@/lib/tenants";
 import { hasTestDatabase, withRollback, type TestDb } from "@/test/supabase-harness";
 
 /**
@@ -42,6 +43,55 @@ const ADD_CONSTRAINT_SQL = `
       tstzrange(start_time, end_time) with &&
     ) where (status <> 'cancelled')
 `;
+
+/**
+ * The pre-apply overlap-detection query, verbatim from 0006's header comment.
+ *
+ * Copied rather than imported because the header is a SQL comment — which is
+ * exactly why it needs a test. An operator runs this against production and
+ * reads "zero rows" as "safe to apply". A query that can never return rows
+ * would give that same answer on a database full of overlaps.
+ */
+const DETECTION_QUERY = `
+  select a.id as a_id, b.id as b_id, a.customer_id, a.start_time, a.end_time
+  from public.bookings a
+  join public.bookings b
+    on a.customer_id = b.customer_id
+   and a.id < b.id
+   and a.status <> 'cancelled'
+   and b.status <> 'cancelled'
+   and tstzrange(a.start_time, a.end_time) && tstzrange(b.start_time, b.end_time)
+`;
+
+/**
+ * Every value `bookings.status` may hold, per 0001's CHECK. Sorted.
+ *
+ * Criterion 8 asserts the live schema still matches this list. A fifth status
+ * added without updating both the constraint predicate and the availability
+ * filter is precisely how ghost slots come back, so it must fail loudly here
+ * rather than be inferred at runtime.
+ */
+const KNOWN_BOOKING_STATUSES = [
+  "cancelled",
+  "completed",
+  "confirmed",
+  "pending",
+] as const;
+
+type BookingStatus = (typeof KNOWN_BOOKING_STATUSES)[number];
+
+/**
+ * The filter `getUpcomingBookings` (`src/lib/tenants.ts`) applies when deciding
+ * which bookings occupy a slot.
+ *
+ * The exempt status is **imported from the module under test**, not retyped, so
+ * changing it there changes it here and this test moves with it. Only the SQL
+ * shape around it is restated — the real function reaches the table through
+ * PostgREST, which the hermetic container does not run. The predicate is then
+ * *executed* against the live table below, so the occupied-set is measured
+ * against the same schema the blocked-set is measured against.
+ */
+const AVAILABILITY_OCCUPIED_PREDICATE = `status <> '${SLOT_FREEING_STATUS}'`;
 
 interface Tenant {
   customerId: string;
@@ -92,7 +142,7 @@ async function insertBooking(
   tenant: Tenant,
   start: string,
   end: string,
-  status: "pending" | "confirmed" | "cancelled" = "pending",
+  status: BookingStatus = "pending",
 ): Promise<string> {
   await db.setTenant(tenant.customerId);
   const [row] = await db.query<{ id: string }>(
@@ -117,6 +167,28 @@ async function expectSqlState(
   sqlstate: string,
 ): Promise<void> {
   await expect(promise).rejects.toHaveProperty("code", sqlstate);
+}
+
+/** Rows in `pg_constraint` for `bookings_no_overlap` on `public.bookings`. */
+async function constraintRows(db: TestDb) {
+  return db.query<{ contype: string }>(
+    `select contype from pg_constraint
+     where conname = 'bookings_no_overlap'
+       and conrelid = 'public.bookings'::regclass`,
+  );
+}
+
+/**
+ * Assert no trace of the constraint remains — neither the catalog entry nor the
+ * GiST index relation `ADD CONSTRAINT ... EXCLUDE` builds to back it. An apply
+ * that half-unwound would leave the second behind.
+ */
+async function expectNoConstraintArtifacts(db: TestDb): Promise<void> {
+  expect(await constraintRows(db)).toHaveLength(0);
+  const relations = await db.query(
+    "select relname from pg_class where relname = 'bookings_no_overlap'",
+  );
+  expect(relations).toHaveLength(0);
 }
 
 describe.skipIf(!hasTestDatabase)("bookings_no_overlap", () => {
@@ -251,23 +323,28 @@ describe.skipIf(!hasTestDatabase)("bookings_no_overlap", () => {
   });
 
   // ── Criterion 7 ────────────────────────────────────────────────────────────
-  // Two transactions, because part (a) deliberately aborts its own.
+  //
+  // One transaction, with a savepoint. The earlier two-transaction form was
+  // circular: its second transaction asserted "constraint present, dirty rows
+  // gone", which is true of the *committed* state whether the ALTER failed or
+  // succeeded — it passed either way and so discriminated nothing. A savepoint
+  // both recovers the aborted transaction and lets the aftermath be observed
+  // where it is actually visible: inside the transaction that produced it.
   it("fails atomically when applied to a table that already holds overlaps", async () => {
-    // Captured in (a), asserted in (b). The rows are addressed by tenant so (b)
-    // can scope its read under RLS rather than relying on a superuser.
-    let dirtyCustomerId = "";
-
-    // (a) Simulate applying 0006 to dirty data: drop the constraint, create the
-    // overlap the production database is only *believed* not to have, and
-    // re-add it. `ALTER TABLE … ADD CONSTRAINT` validates existing rows.
     await withRollback(async (db) => {
       const tenant = await seedTenant(db, "dirty-data");
-      dirtyCustomerId = tenant.customerId;
 
+      // Start from a table without the constraint, so the ALTER below is the
+      // real event being modelled: a first application of 0006 against data
+      // that is already dirty.
       await db.query(
         "alter table public.bookings drop constraint bookings_no_overlap",
       );
+      await expectNoConstraintArtifacts(db);
 
+      await db.query("savepoint before_apply");
+
+      // The overlap production is only *believed* not to have.
       await insertBooking(
         db,
         tenant,
@@ -283,29 +360,195 @@ describe.skipIf(!hasTestDatabase)("bookings_no_overlap", () => {
         "confirmed",
       );
 
+      // The discriminating assertion: `ADD CONSTRAINT` validates existing rows
+      // and must refuse. If a constraint could be created over overlapping
+      // data, the whole guarantee is void and this test fails right here.
       await expectSqlState(
         db.query(ADD_CONSTRAINT_SQL),
         SQLSTATE_EXCLUSION_VIOLATION,
       );
+
+      // The failed statement aborted the transaction; the savepoint is what
+      // makes it recoverable.
+      await db.query("rollback to savepoint before_apply");
+      await db.setTenant(tenant.customerId);
+
+      // No partial state: no catalog entry, and no orphaned GiST index.
+      await expectNoConstraintArtifacts(db);
+
+      // The transaction is usable again rather than poisoned, and the rows that
+      // provoked the failure went with the savepoint.
+      const remaining = await db.query<{ n: number }>(
+        "select count(*)::int as n from public.bookings where customer_id = $1",
+        [tenant.customerId],
+      );
+      expect(remaining[0]?.n).toBe(0);
+
+      // And the table is genuinely restorable, not wedged: with the overlap
+      // gone the very same ALTER now succeeds. This is what makes "rollback is
+      // a no-op" a claim about the schema rather than about the catalog query.
+      await db.query(ADD_CONSTRAINT_SQL);
+      const restored = await constraintRows(db);
+      expect(restored).toHaveLength(1);
+      expect(restored[0]?.contype).toBe("x");
     });
+  });
 
-    // (b) The failed ALTER left no partial state: the schema is as it was, and
-    // the rows that provoked it are gone with the rollback. This is why the
-    // production apply needs no bespoke rollback plan — only the pre-apply
-    // detection query in 0006's header, to find the hits before they abort it.
+  // ── Criterion 8 ────────────────────────────────────────────────────────────
+  it("availability's occupied-set equals the constraint's blocked-set", async () => {
     await withRollback(async (db) => {
-      const constraint = await db.query<{ contype: string }>(
-        "select contype from pg_constraint where conname = 'bookings_no_overlap'",
+      // (a) The status domain, read from 0001's CHECK rather than assumed. A
+      // fifth status must fail here, forcing a decision about both sets.
+      const checks = await db.query<{ def: string }>(
+        `select pg_get_constraintdef(oid) as def
+         from pg_constraint
+         where conrelid = 'public.bookings'::regclass and contype = 'c'`,
       );
-      expect(constraint).toHaveLength(1);
-      expect(constraint[0]?.contype).toBe("x");
+      const statusCheck = checks
+        .map((c) => c.def)
+        .find((def) => def.includes("status"));
+      expect(statusCheck).toBeDefined();
 
-      await db.setTenant(dirtyCustomerId);
-      const leftovers = await db.query(
-        "select id from public.bookings where customer_id = $1",
-        [dirtyCustomerId],
+      const domain = [...statusCheck!.matchAll(/'([a-z_]+)'::text/g)]
+        .map((m) => m[1]!)
+        .sort();
+      expect(domain).toEqual([...KNOWN_BOOKING_STATUSES]);
+
+      // (b) The constraint's blocked-set, derived by probing the live
+      // constraint once per status against an existing confirmed booking —
+      // not by re-reading its predicate.
+      const anchor = await seedTenant(db, "sets-anchor");
+      await insertBooking(
+        db,
+        anchor,
+        "2026-09-05T09:00:00Z",
+        "2026-09-05T10:00:00Z",
+        "confirmed",
       );
-      expect(leftovers).toHaveLength(0);
+
+      const blocked: string[] = [];
+      for (const status of domain) {
+        await db.query("savepoint probe");
+        try {
+          await insertBooking(
+            db,
+            anchor,
+            "2026-09-05T09:30:00Z",
+            "2026-09-05T10:30:00Z",
+            status as BookingStatus,
+          );
+        } catch (err) {
+          expect(err).toHaveProperty("code", SQLSTATE_EXCLUSION_VIOLATION);
+          blocked.push(status);
+        }
+        await db.query("rollback to savepoint probe");
+      }
+
+      // (c) Availability's occupied-set, derived by running its filter against
+      // one booking of every status.
+      const grid = await seedTenant(db, "sets-grid");
+      let hour = 9;
+      for (const status of domain) {
+        await insertBooking(
+          db,
+          grid,
+          `2026-09-06T${String(hour).padStart(2, "0")}:00:00Z`,
+          `2026-09-06T${String(hour + 1).padStart(2, "0")}:00:00Z`,
+          status as BookingStatus,
+        );
+        hour += 1;
+      }
+
+      const occupiedRows = await db.query<{ status: string }>(
+        `select status from public.bookings
+         where customer_id = $1 and ${AVAILABILITY_OCCUPIED_PREDICATE}`,
+        [grid.customerId],
+      );
+      const occupied = occupiedRows.map((r) => r.status).sort();
+
+      // The point of the whole criterion. Narrower availability = ghost slots
+      // the guest can pick and the database then rejects; wider = real
+      // availability silently vanishing.
+      expect(occupied).toEqual(blocked);
+      expect(blocked).toEqual(["completed", "confirmed", "pending"]);
+    });
+  });
+
+  // ── The detection query in 0006's header actually detects ──────────────────
+  it("the pre-apply detection query surfaces a known-dirty overlap", async () => {
+    await withRollback(async (db) => {
+      const tenant = await seedTenant(db, "detection");
+      // Scope assertions to this test's tenant. The detection query is run
+      // verbatim (no tenant filter — that is the query an operator pastes into
+      // production), so anything else in the database is filtered out here
+      // rather than by editing the SQL under test.
+      const mine = <T extends { customer_id: string }>(rows: T[]): T[] =>
+        rows.filter((r) => r.customer_id === tenant.customerId);
+
+      await db.query(
+        "alter table public.bookings drop constraint bookings_no_overlap",
+      );
+
+      // Clean baseline: the query is quiet when there is nothing to find.
+      const clean = await db.query<{ customer_id: string }>(DETECTION_QUERY);
+      expect(mine(clean)).toHaveLength(0);
+
+      const first = await insertBooking(
+        db,
+        tenant,
+        "2026-09-07T09:00:00Z",
+        "2026-09-07T10:00:00Z",
+        "confirmed",
+      );
+      const second = await insertBooking(
+        db,
+        tenant,
+        "2026-09-07T09:30:00Z",
+        "2026-09-07T10:30:00Z",
+        "confirmed",
+      );
+
+      // The assertion that matters: on genuinely dirty data the query must
+      // speak up. A query that always returns zero rows — because of a typo,
+      // or because RLS is hiding everything from the reading role — reads as
+      // "safe to apply" and walks the operator into a failed ALTER.
+      const hits = await db.query<{
+        a_id: string;
+        b_id: string;
+        customer_id: string;
+      }>(DETECTION_QUERY);
+      const ours = mine(hits);
+      expect(ours).toHaveLength(1);
+      expect([ours[0]!.a_id, ours[0]!.b_id].sort()).toEqual(
+        [first, second].sort(),
+      );
+
+      // And it must not cry wolf: back-to-back bookings are legal, and
+      // cancelled rows are exempt. Either false positive would send an
+      // operator hand-editing production rows that were never a problem.
+      await db.query("savepoint quiet_cases");
+      await db.query(
+        "update public.bookings set status = 'cancelled' where id = $1",
+        [second],
+      );
+      expect(
+        mine(await db.query<{ customer_id: string }>(DETECTION_QUERY)),
+      ).toHaveLength(0);
+      await db.query("rollback to savepoint quiet_cases");
+
+      await db.query("savepoint back_to_back");
+      await db.query("delete from public.bookings where id = $1", [second]);
+      await insertBooking(
+        db,
+        tenant,
+        "2026-09-07T10:00:00Z",
+        "2026-09-07T11:00:00Z",
+        "confirmed",
+      );
+      expect(
+        mine(await db.query<{ customer_id: string }>(DETECTION_QUERY)),
+      ).toHaveLength(0);
+      await db.query("rollback to savepoint back_to_back");
     });
   });
 });

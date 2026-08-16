@@ -101,8 +101,33 @@ export async function getBlockedSlots(
 }
 
 /**
+ * The one status that frees a booking's slot. Everything else — `pending`,
+ * `confirmed`, `completed`, and any status added later — occupies it.
+ *
+ * Exported so `booking-overlap.db.test.ts` (criterion 8) can build the
+ * availability predicate from the same value this query uses, rather than
+ * restating it and hoping the two stay in step. It must equal the exemption in
+ * `bookings_no_overlap`'s `where (status <> 'cancelled')` predicate (0006).
+ */
+export const SLOT_FREEING_STATUS = "cancelled";
+
+/**
  * Upcoming live bookings for a tenant, used to subtract taken times from the
- * slot grid. Only active reservations (pending/confirmed) block a slot.
+ * slot grid.
+ *
+ * The filter is `status <> 'cancelled'` — **the same predicate as the
+ * `bookings_no_overlap` exclusion constraint** in migration 0006 (ALI-98).
+ * These two sets must be identical. If this query is the narrower of the two,
+ * the difference renders as *ghost slots*: times the grid offers as free that
+ * the database then refuses at submit time, so the guest picks a slot, fills
+ * in their details, and is told to pick another. If it were the wider of the
+ * two, real availability would silently disappear.
+ *
+ * It was `.in("status", ["pending", "confirmed"])`, which made `completed` a
+ * ghost. Stated as an exclusion rather than an allow-list so a future fifth
+ * status is treated as occupying by default — the safe direction — instead of
+ * silently freeing the slot. `booking-overlap.db.test.ts` (criterion 8) derives
+ * both sets from the live schema and fails if they ever diverge.
  */
 export async function getUpcomingBookings(
   customerId: string,
@@ -114,7 +139,7 @@ export async function getUpcomingBookings(
       "id, customer_id, service_id, end_customer_id, start_time, end_time, notes, status, custom_fields",
     )
     .eq("customer_id", customerId)
-    .in("status", ["pending", "confirmed"])
+    .neq("status", SLOT_FREEING_STATUS)
     .gte("end_time", new Date().toISOString())
     .returns<BookingRow[]>();
 

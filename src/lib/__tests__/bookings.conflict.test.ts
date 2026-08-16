@@ -188,14 +188,17 @@ describe("createBookingAction — the shape the guest's browser receives", () =>
     });
   });
 
-  it("does not leak the database's wording for a non-23P01 failure", async () => {
+  it("reports a non-23P01 failure as a failure, not as a scheduling conflict", async () => {
     arrangeInsertFailure(foreignKeyViolation());
 
     const result = await createBookingAction(INPUT);
 
-    // The action maps any thrown Error to its message, so a raw driver error
-    // still reaches the user — but as itself, distinguishable in logs and
-    // support tickets from a genuine slot clash, which is the point.
+    // Scope, stated plainly: this asserts only that a real fault is NOT
+    // disguised as "that time was just taken". It does not assert the message
+    // is fit for a guest to read — the action maps any thrown Error to its
+    // `message`, so today the raw PostgREST wording does reach the caller.
+    // Sanitising that is ALI-140's job, not this issue's; asserting it here
+    // would pin behaviour ALI-140 is meant to change.
     expect(result.ok).toBe(false);
     expect(result).not.toEqual({ ok: false, error: CONFLICT_MESSAGE });
   });
