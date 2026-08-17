@@ -126,7 +126,53 @@ export interface Booking {
   customFields: CustomFields;
 }
 
-/** Input for creating a booking (server action). Identity is resolved by email. */
+/**
+ * What the browser is allowed to send to `createBookingAction` (ALI-139).
+ *
+ * There is deliberately **no `customerId`** here. The tenant a booking lands in
+ * is resolved server-side from the slug (`getTenantBySlug`); a UUID posted by
+ * the browser is not an input to that decision, it is an attack. Removing the
+ * field is what makes the compiler enforce it: the old shape carried
+ * `customerId` straight through to a client that bypasses RLS, so any visitor
+ * could write rows into — and squat the calendar of — any other tenant.
+ *
+ * ## Why a slug is trustworthy input where a UUID is not
+ *
+ * Posting tenant B's *slug* asks for exactly what visiting tenant B's public
+ * booking page asks for: a public action, available to anyone with a browser.
+ * Posting tenant B's *UUID from tenant A's page* asks the server to write into
+ * a tenant the request has no relationship with. The slug is a public page
+ * identity that the server then resolves through the database; the UUID was an
+ * unchecked assertion of authority. That asymmetry is the whole fix.
+ *
+ * ## Why this is spelled out rather than derived from `CreateBookingInput`
+ *
+ * Writing it as `Omit<CreateBookingInput, "customerId"> & {…}` would be
+ * shorter, but it would mean a field added to the internal type silently
+ * widens what the browser may send. At a trust boundary the explicit list is
+ * the point — adding to it should be a deliberate edit.
+ */
+export interface CreateBookingRequest {
+  /**
+   * The tenant's public slug — the `[customerSlug]` route segment the guest is
+   * booking on. Resolved to a `customer_id` server-side; never trusted as one.
+   */
+  customerSlug: string;
+  serviceId: string;
+  slot: TimeSlot;
+  guest: GuestDetails;
+  customFields?: CustomFields;
+}
+
+/**
+ * Input for `createBooking` — the internal, already-trusted shape. Identity is
+ * resolved by email.
+ *
+ * `customerId` here is a **server-resolved** id (from `getTenantBySlug`, or a
+ * `tenant_members` lookup on the admin side), never a value that arrived from a
+ * browser. The type cannot express that distinction on its own, which is why
+ * the browser-facing `CreateBookingRequest` above simply has no such field.
+ */
 export interface CreateBookingInput {
   customerId: string;
   serviceId: string;

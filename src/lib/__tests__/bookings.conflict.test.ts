@@ -5,7 +5,12 @@ import { createBookingAction } from "@/app/[customerSlug]/actions";
 import { generateDaySlots } from "@/lib/availability";
 import { createBooking } from "@/lib/bookings";
 import { createServiceRoleClient } from "@/lib/supabase/server";
-import type { CreateBookingInput } from "@/lib/types";
+import { getTenantBySlug } from "@/lib/tenants";
+import type {
+  CreateBookingInput,
+  CreateBookingRequest,
+  Tenant,
+} from "@/lib/types";
 
 /**
  * The insert path's error handling (ALI-98, criteria 5 and 6).
@@ -45,6 +50,12 @@ vi.mock("@/lib/tenants", () => ({
   getAvailabilityRules: vi.fn(async () => []),
   getBlockedSlots: vi.fn(async () => []),
   getUpcomingBookings: vi.fn(async () => []),
+  // ALI-139: the action now resolves the tenant from the slug before it writes
+  // anything, so this suite would not reach the insert without it. The
+  // implementation is attached in `arrangeInsertFailure` rather than here —
+  // `vi.mock` factories run during import, before this module's constants
+  // exist, so referencing `TENANT` from inside one would throw.
+  getTenantBySlug: vi.fn(),
 }));
 
 vi.mock("@/lib/availability", () => ({
@@ -54,6 +65,18 @@ vi.mock("@/lib/availability", () => ({
 const CUSTOMER_ID = "11111111-1111-4111-8111-111111111111";
 const SERVICE_ID = "22222222-2222-4222-8222-222222222222";
 const END_CUSTOMER_ID = "33333333-3333-4333-8333-333333333333";
+const TENANT_SLUG = "conflict-fixture";
+
+const TENANT: Tenant = {
+  id: CUSTOMER_ID,
+  name: "Conflict Fixture",
+  slug: TENANT_SLUG,
+  branding: {
+    brandColor: "#000000",
+    currency: "USD",
+    timezone: "UTC",
+  },
+};
 
 const SLOT = {
   start: "2026-09-01T10:00:00.000Z",
@@ -62,6 +85,17 @@ const SLOT = {
 
 const INPUT: CreateBookingInput = {
   customerId: CUSTOMER_ID,
+  serviceId: SERVICE_ID,
+  slot: SLOT,
+  guest: { name: "Ada Lovelace", email: "ada@example.test" },
+};
+
+/**
+ * The same booking as `INPUT`, in the shape the browser may send (ALI-139):
+ * the tenant is named by its public slug and the action resolves the id.
+ */
+const REQUEST: CreateBookingRequest = {
+  customerSlug: TENANT_SLUG,
   serviceId: SERVICE_ID,
   slot: SLOT,
   guest: { name: "Ada Lovelace", email: "ada@example.test" },
@@ -107,6 +141,11 @@ function stubSupabase(insertResult: InsertResult): SupabaseClient {
 
 /** Arrange the mocks so control reaches the insert, which then fails with `error`. */
 function arrangeInsertFailure(error: PostgrestError): void {
+  // Slug → tenant, the way `getTenantBySlug` really behaves: the fixture slug
+  // resolves, anything else resolves to `null` rather than to a tenant.
+  vi.mocked(getTenantBySlug).mockImplementation(async (slug: string) =>
+    slug === TENANT_SLUG ? TENANT : null,
+  );
   // The slot the caller asked for is reported as open, so the pre-check passes
   // and the constraint — not the check — is what rejects the booking. This is
   // precisely the race: availability says free, the database says taken.
@@ -182,7 +221,7 @@ describe("createBookingAction — the shape the guest's browser receives", () =>
   it("returns { ok: false, error } with the friendly message on 23P01", async () => {
     arrangeInsertFailure(exclusionViolation());
 
-    await expect(createBookingAction(INPUT)).resolves.toEqual({
+    await expect(createBookingAction(REQUEST)).resolves.toEqual({
       ok: false,
       error: CONFLICT_MESSAGE,
     });
@@ -191,7 +230,7 @@ describe("createBookingAction — the shape the guest's browser receives", () =>
   it("reports a non-23P01 failure as a failure, not as a scheduling conflict", async () => {
     arrangeInsertFailure(foreignKeyViolation());
 
-    const result = await createBookingAction(INPUT);
+    const result = await createBookingAction(REQUEST);
 
     // Scope, stated plainly: this asserts only that a real fault is NOT
     // disguised as "that time was just taken". It does not assert the message
