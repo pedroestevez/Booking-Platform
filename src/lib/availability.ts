@@ -198,13 +198,17 @@ function zoneOffsetMs(timeZone: string, instantMs: number): number {
   return pseudoUtcMs(clockInZone(timeZone, instantMs)) - instantMs;
 }
 
-/** The calendar date `instant` falls on in `timeZone`, as a civil date. */
-function civilDateInZone(
-  timeZone: string,
-  instant: Date,
-): Pick<ZonedClock, "year" | "month" | "day"> {
-  const { year, month, day } = clockInZone(timeZone, instant.getTime());
-  return { year, month, day };
+/**
+ * The calendar date `instant` falls on in `timeZone`.
+ *
+ * A zone-first alias of the exported `civilDateInTimeZone`, kept only so
+ * `generateDaySlots`'s call site reads in the argument order the rest of this
+ * module's private helpers use. It delegates rather than repeating the body: two
+ * functions computing the same thing is how one of them drifts, and drift
+ * between "which day is this" implementations is precisely the B1 defect.
+ */
+function civilDateInZone(timeZone: string, instant: Date): CivilDate {
+  return civilDateInTimeZone(instant, timeZone);
 }
 
 /**
