@@ -47,6 +47,18 @@ vi.mock("@/lib/availability", () => ({
   generateDaySlots: vi.fn(() => []),
 }));
 
+// The fixture service is free, so every booking here inserts `confirmed` and
+// now triggers the confirmation email (ALI-69). This fake database has no
+// `tenant_members` table, so the send path would fail, contain its own failure
+// and log it — correct behaviour, but noise in a suite about guest identity.
+// The email path is proved in
+// `src/lib/email/__tests__/booking-confirmation.test.ts`.
+vi.mock("@/lib/email/booking-confirmation", () => ({
+  EMAIL_OPERATION: "booking-confirmation-email",
+  redactSensitive: (text: string) => text,
+  sendBookingConfirmation: vi.fn(async () => ({ sent: 0, failed: 0 })),
+}));
+
 const TENANT = {
   id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
   slug: "tenant-one",

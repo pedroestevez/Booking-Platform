@@ -1,6 +1,11 @@
 import "server-only";
 
 import { generateDaySlots } from "@/lib/availability";
+import {
+  EMAIL_OPERATION,
+  redactSensitive,
+  sendBookingConfirmation,
+} from "@/lib/email/booking-confirmation";
 import { createServiceRoleClient } from "@/lib/supabase/server";
 import {
   mapBooking,
@@ -282,5 +287,52 @@ export async function createBooking(
     }
     throw insertError;
   }
-  return mapBooking(booking);
+
+  const created = mapBooking(booking);
+
+  // ── The confirmation email (ALI-69) ────────────────────────────────────────
+  //
+  // Position is the invariant. This sits **after** the insert's `.single()` has
+  // resolved without error, so there is no ordering in which an email can claim
+  // a booking that was never stored — not the availability refusal, not the
+  // 23P01 loser of a race, not a driver fault: every one of those paths threw
+  // above and never reached this line.
+  //
+  // The guard reads the status the database returned, and changes nothing about
+  // it: `initialBookingStatus` (ALI-176) decides what is inserted, this decides
+  // only whether that outcome is worth telling anyone about. A `pending`
+  // booking is a slot held pending payment, and saying "you're confirmed" about
+  // one would be a lie the guest acts on.
+  //
+  // The `try` is the second half of the invariant, and it is deliberately
+  // redundant: `sendBookingConfirmation` already contains every failure it can
+  // produce and never rejects. This catch exists so that remains true if that
+  // ever stops being true — a booking is stored, and no failure in a
+  // notification about it may turn a stored booking into a thrown error the
+  // guest reads as "your booking failed". The safe direction is "booked but not
+  // emailed", never the reverse.
+  if (created.status === "confirmed") {
+    try {
+      await sendBookingConfirmation({
+        booking: created,
+        service: { name: service.name },
+        guest,
+      });
+    } catch (err) {
+      console.error(
+        `[${EMAIL_OPERATION}] unexpected failure notifying booking ` +
+          `${created.id}. The booking is stored and unaffected.`,
+        {
+          operation: EMAIL_OPERATION,
+          bookingId: created.id,
+          customerId: created.customerId,
+          error: redactSensitive(
+            err instanceof Error ? err.message : String(err),
+          ),
+        },
+      );
+    }
+  }
+
+  return created;
 }

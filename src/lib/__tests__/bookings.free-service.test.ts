@@ -44,6 +44,18 @@ vi.mock("@/lib/availability", () => ({
   generateDaySlots: vi.fn(() => []),
 }));
 
+// A `confirmed` insert now triggers the confirmation email (ALI-69), which this
+// suite's arrangement cannot serve — `@/lib/tenants` is mocked down to three
+// functions. Left unmocked the send path is exercised, fails, contains its own
+// failure and logs it, which is correct behaviour but is noise here: what this
+// suite is about is the status on the inserted row. The email path is proved in
+// `src/lib/email/__tests__/booking-confirmation.test.ts`.
+vi.mock("@/lib/email/booking-confirmation", () => ({
+  EMAIL_OPERATION: "booking-confirmation-email",
+  redactSensitive: (text: string) => text,
+  sendBookingConfirmation: vi.fn(async () => ({ sent: 0, failed: 0 })),
+}));
+
 const CUSTOMER_ID = "11111111-1111-4111-8111-111111111111";
 const SERVICE_ID = "22222222-2222-4222-8222-222222222222";
 const END_CUSTOMER_ID = "33333333-3333-4333-8333-333333333333";
