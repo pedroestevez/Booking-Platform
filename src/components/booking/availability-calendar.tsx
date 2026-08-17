@@ -1,26 +1,21 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import {
-  addMonths,
-  eachDayOfInterval,
-  endOfMonth,
-  endOfWeek,
-  format,
-  isBefore,
-  isSameDay,
-  isSameMonth,
-  isToday,
-  startOfDay,
-  startOfMonth,
-  startOfWeek,
-} from "date-fns";
 import { CalendarOff, ChevronLeft, ChevronRight } from "lucide-react";
 
 import {
+  addCivilMonths,
+  assertIanaTimeZone,
   availableWeekdays,
+  civilDateInTimeZone,
+  civilMonthGrid,
+  compareCivilDates,
   generateDaySlots,
-  weekdayInTimeZone,
+  instantForCivilDate,
+  sameCivilDate,
+  weekdayOfCivilDate,
+  type CivilDate,
+  type CivilMonth,
 } from "@/lib/availability";
 import type {
   AvailabilityRule,
@@ -30,9 +25,56 @@ import type {
   TenantBranding,
   TimeSlot,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, formatTime } from "@/lib/utils";
 
 const WEEKDAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"];
+
+/**
+ * Labels for civil dates.
+ *
+ * `timeZone: "UTC"` here is **not** a timezone conversion — it is an identity
+ * read-back. The value being formatted is a `Date.UTC`-built carrier whose UTC
+ * fields *are* the civil date's `year`/`month`/`day`, so reading it in UTC
+ * returns exactly those numbers. Formatting the same carrier in the process's
+ * zone, or the tenant's, would shift it — which is the whole class of bug this
+ * component was rewritten to remove.
+ */
+const LONG_DAY = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
+  weekday: "long",
+  month: "long",
+  day: "numeric",
+});
+const SHORT_DAY = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
+  weekday: "long",
+  month: "short",
+  day: "numeric",
+});
+const MONTH_AND_YEAR = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
+  month: "long",
+  year: "numeric",
+});
+
+function carrier(date: CivilDate): Date {
+  return new Date(Date.UTC(date.year, date.month - 1, date.day));
+}
+
+/**
+ * The accessible label a day cell carries, e.g. `"Monday, August 17"`.
+ *
+ * Exported so the calendar's tests read the *rendered* label through the same
+ * function that produced it, rather than re-deriving what they hope it says.
+ */
+export function formatCivilDate(date: CivilDate): string {
+  return LONG_DAY.format(carrier(date));
+}
+
+/** Stable React key for a cell. */
+function civilKeyString(date: CivilDate): string {
+  return `${date.year}-${date.month}-${date.day}`;
+}
 
 interface AvailabilityCalendarProps {
   rules: AvailabilityRule[];
@@ -44,6 +86,24 @@ interface AvailabilityCalendarProps {
   onSelectSlot: (slot: TimeSlot) => void;
 }
 
+/**
+ * The guest-facing month grid and slot list.
+ *
+ * ## Every date here is the tenant's, not the visitor's (ALI-117 B1)
+ *
+ * Cells are `CivilDate`s in `branding.timezone`, walked with civil-calendar
+ * arithmetic. Nothing in this component builds a date from the browser's clock
+ * and then interprets it — the previous version did, and for any visitor east
+ * of the tenant it enabled the wrong cell: a Monday-only New York business
+ * showed **Tuesday** enabled under UTC (Vercel's SSR zone) and Europe/London,
+ * and clicking it produced a correct Monday instant. The guest read Tuesday,
+ * booked, and got a Monday appointment on their calendar.
+ *
+ * The single conversion point is `instantForCivilDate`, which turns the clicked
+ * cell into the instant `generateDaySlots` resolves rules against. Slot times
+ * are rendered with `formatTime(..., branding.timezone)` so the clock the guest
+ * reads is the clock the business keeps — the same one named beside the list.
+ */
 export function AvailabilityCalendar({
   rules,
   blocked,
@@ -53,46 +113,88 @@ export function AvailabilityCalendar({
   selectedSlot,
   onSelectSlot,
 }: AvailabilityCalendarProps) {
-  const today = useMemo(() => startOfDay(new Date()), []);
-  const [visibleMonth, setVisibleMonth] = useState(() => startOfMonth(today));
-  const [selectedDay, setSelectedDay] = useState<Date | null>(null);
+  const timeZone = branding.timezone;
+
+  // A tenant whose `branding_json.timezone` is missing or malformed must not
+  // take their whole booking page down. `generateDaySlots` throws by design —
+  // that is criterion 2, and it is right — but a throw during a client render
+  // has no error boundary above it here, so the page renders blank. Checked
+  // once, up front, and turned into a legible state below.
+  //
+  // This is containment, not a fix: the real repair is refusing a bad zone at
+  // provisioning time, which is ALI-176/ALI-184's `assertIanaTimeZone` call and
+  // deliberately not made here.
+  const zoneUsable = useMemo(() => {
+    try {
+      assertIanaTimeZone(timeZone);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [timeZone]);
+
+  // "Today" is the tenant's today. A visitor in Auckland at 09:00 on the 18th is
+  // looking at a New York business on the 17th, and the calendar they are shown
+  // is the business's.
+  const today = useMemo(
+    () => (zoneUsable ? civilDateInTimeZone(new Date(), timeZone) : null),
+    [zoneUsable, timeZone],
+  );
+
+  // Stored as an offset rather than a month so it cannot drift out of step with
+  // the tenant's own current month.
+  const [monthOffset, setMonthOffset] = useState(0);
+  const [selectedDay, setSelectedDay] = useState<CivilDate | null>(null);
+
+  const visibleMonth = useMemo<CivilMonth | null>(
+    () => (today ? addCivilMonths(today, monthOffset) : null),
+    [today, monthOffset],
+  );
 
   const openWeekdays = useMemo(() => availableWeekdays(rules), [rules]);
 
-  const days = useMemo(() => {
-    const gridStart = startOfWeek(startOfMonth(visibleMonth));
-    const gridEnd = endOfWeek(endOfMonth(visibleMonth));
-    return eachDayOfInterval({ start: gridStart, end: gridEnd });
-  }, [visibleMonth]);
+  const days = useMemo(
+    () => (visibleMonth ? civilMonthGrid(visibleMonth) : []),
+    [visibleMonth],
+  );
 
   const slots = useMemo<TimeSlot[]>(() => {
-    if (!selectedDay) return [];
+    if (!selectedDay || !zoneUsable) return [];
     return generateDaySlots({
-      day: selectedDay,
+      // The one place a cell becomes an instant.
+      day: instantForCivilDate(selectedDay, timeZone),
       rules,
       service,
-      // The business's zone, not the visitor's browser's. Passing it here is
-      // half of the no-ghost-slots guarantee: `createBooking` re-validates the
-      // chosen slot with the same function and the same zone, resolved
-      // server-side, so the set offered and the set accepted are the same set.
-      timeZone: branding.timezone,
+      timeZone,
       blocked,
       bookings,
     });
-  }, [selectedDay, rules, service, branding.timezone, blocked, bookings]);
+  }, [selectedDay, zoneUsable, timeZone, rules, service, blocked, bookings]);
 
-  const canGoBack = !isSameMonth(visibleMonth, today);
+  if (!zoneUsable || !today || !visibleMonth) {
+    return (
+      <div
+        role="status"
+        className="flex min-h-40 flex-col items-center justify-center gap-2 rounded-lg border border-dashed p-6 text-center"
+      >
+        <CalendarOff className="size-5 text-muted-foreground/60" aria-hidden />
+        <p className="text-sm font-medium">Online booking is unavailable.</p>
+        <p className="text-sm text-muted-foreground">
+          This business&rsquo;s calendar is not configured correctly yet. Please
+          contact them directly to arrange a time.
+        </p>
+      </div>
+    );
+  }
 
-  function isDayBookable(day: Date): boolean {
-    if (isBefore(day, today)) return false;
-    // The tenant's weekday, not the visitor's. `day.getDay()` here dimmed days
-    // by whatever zone the browser happened to be in, so a grid could offer
-    // Tuesday to a visitor in Auckland for a business that only opens Mondays —
-    // and then generate the Monday slots anyway. Same function the slot engine
-    // uses, so the two cannot drift apart.
-    if (!openWeekdays.has(weekdayInTimeZone(day, branding.timezone))) {
-      return false;
-    }
+  const canGoBack = monthOffset > 0;
+
+  function isDayBookable(day: CivilDate): boolean {
+    if (!today) return false;
+    if (compareCivilDates(day, today) < 0) return false;
+    // The tenant's weekday for the tenant's calendar date — no instant, and so
+    // no browser clock, anywhere in this decision.
+    if (!openWeekdays.has(weekdayOfCivilDate(day))) return false;
     return true;
   }
 
@@ -102,12 +204,14 @@ export function AvailabilityCalendar({
       <div>
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold" aria-live="polite">
-            {format(visibleMonth, "MMMM yyyy")}
+            {MONTH_AND_YEAR.format(
+              carrier({ year: visibleMonth.year, month: visibleMonth.month, day: 1 }),
+            )}
           </h3>
           <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={() => setVisibleMonth((m) => addMonths(m, -1))}
+              onClick={() => setMonthOffset((m) => m - 1)}
               disabled={!canGoBack}
               aria-label="Previous month"
               className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
@@ -116,7 +220,7 @@ export function AvailabilityCalendar({
             </button>
             <button
               type="button"
-              onClick={() => setVisibleMonth((m) => addMonths(m, 1))}
+              onClick={() => setMonthOffset((m) => m + 1)}
               aria-label="Next month"
               className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
@@ -138,15 +242,16 @@ export function AvailabilityCalendar({
 
           {days.map((day) => {
             const bookable = isDayBookable(day);
-            const inMonth = isSameMonth(day, visibleMonth);
-            const selected = selectedDay && isSameDay(day, selectedDay);
+            const inMonth = day.month === visibleMonth.month && day.year === visibleMonth.year;
+            const selected = selectedDay && sameCivilDate(day, selectedDay);
+            const isToday = sameCivilDate(day, today);
             return (
               <button
-                key={day.toISOString()}
+                key={civilKeyString(day)}
                 type="button"
                 disabled={!bookable}
                 onClick={() => setSelectedDay(day)}
-                aria-label={format(day, "EEEE, MMMM d")}
+                aria-label={formatCivilDate(day)}
                 aria-pressed={!!selected}
                 className={cn(
                   "relative flex aspect-square items-center justify-center rounded-lg text-sm font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -158,11 +263,11 @@ export function AvailabilityCalendar({
                     "bg-primary text-primary-foreground hover:bg-primary",
                   !selected &&
                     bookable &&
-                    isToday(day) &&
+                    isToday &&
                     "ring-1 ring-inset ring-primary/40",
                 )}
               >
-                {format(day, "d")}
+                {day.day}
                 {bookable && !selected && (
                   <span
                     className="absolute bottom-1 size-1 rounded-full bg-primary/60"
@@ -187,10 +292,10 @@ export function AvailabilityCalendar({
           <div>
             <div className="mb-3 flex items-baseline justify-between">
               <h3 className="text-sm font-semibold">
-                {format(selectedDay, "EEEE, MMM d")}
+                {SHORT_DAY.format(carrier(selectedDay))}
               </h3>
               <span className="text-xs text-muted-foreground">
-                {branding.timezone.replace(/_/g, " ")}
+                {timeZone.replace(/_/g, " ")}
               </span>
             </div>
 
@@ -224,7 +329,10 @@ export function AvailabilityCalendar({
                           : "border-input hover:border-primary/50 hover:bg-accent",
                       )}
                     >
-                      {format(new Date(slot.start), "h:mm a")}
+                      {/* The business's clock — the one named above this list.
+                          Rendering the browser's would label a 9:00 AM New York
+                          slot "1:00 PM" under a UTC SSR render. */}
+                      {formatTime(slot.start, timeZone)}
                     </button>
                   );
                 })}

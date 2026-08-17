@@ -208,21 +208,150 @@ function civilDateInZone(
 }
 
 /**
+ * A calendar date as the tenant's own clock names it — no zone attached, no
+ * instant implied. `2026-08-17` in New York is this, and it is *not* an instant:
+ * it begins and ends at different moments depending on whose clock you ask.
+ *
+ * This type exists because conflating the two is the bug it was introduced to
+ * fix. The guest calendar built each cell as a **browser-local midnight** and
+ * then asked which tenant-zone weekday that instant fell on — which, for any
+ * visitor east of the tenant, is the *previous* day. A cell labelled "Tuesday"
+ * would be enabled for a Monday-only business, and clicking it produced a
+ * correct Monday instant: right slot, wrong day, and a guest who reads Tuesday
+ * on the page and finds Monday on their calendar.
+ *
+ * A cell's identity is a civil date in the tenant's zone. An instant is derived
+ * *from* it (`instantForCivilDate`), never the other way round.
+ */
+export interface CivilDate {
+  year: number;
+  /** 1–12, not the 0–11 a `Date` uses. */
+  month: number;
+  /** 1–31. */
+  day: number;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * A civil date encoded as the epoch ms it would be at UTC midnight.
+ *
+ * A carrier for calendar arithmetic, not an instant anybody should book at.
+ * UTC has no DST, so adding `DAY_MS` always advances exactly one calendar day —
+ * which is the property this encoding is for, and the one local-zone date
+ * arithmetic does not have.
+ */
+function civilKey(date: CivilDate): number {
+  return Date.UTC(date.year, date.month - 1, date.day);
+}
+
+function civilFromKey(key: number): CivilDate {
+  const carrier = new Date(key);
+  return {
+    year: carrier.getUTCFullYear(),
+    month: carrier.getUTCMonth() + 1,
+    day: carrier.getUTCDate(),
+  };
+}
+
+/** The calendar date `instant` falls on in `timeZone`. */
+export function civilDateInTimeZone(instant: Date, timeZone: string): CivilDate {
+  const { year, month, day } = clockInZone(timeZone, instant.getTime());
+  return { year, month, day };
+}
+
+/**
+ * The weekday (0 = Sunday … 6 = Saturday) of a civil date.
+ *
+ * `getUTCDay` on a `Date.UTC`-built carrier is a pure civil-calendar lookup:
+ * both halves are UTC, so the process zone cannot reach it.
+ */
+export function weekdayOfCivilDate(date: CivilDate): number {
+  return new Date(civilKey(date)).getUTCDay();
+}
+
+/** Chronological ordering of two civil dates. */
+export function compareCivilDates(a: CivilDate, b: CivilDate): number {
+  return civilKey(a) - civilKey(b);
+}
+
+/** Whether two civil dates name the same day. */
+export function sameCivilDate(a: CivilDate, b: CivilDate): boolean {
+  return civilKey(a) === civilKey(b);
+}
+
+/**
+ * An instant that falls on `date` in `timeZone` — the reference point to hand
+ * `generateDaySlots` for a given calendar day.
+ *
+ * **Midday local, deliberately not midnight.** Some zones have no `00:00` on
+ * their spring-forward date — `America/Santiago`, `America/Havana` and
+ * `Asia/Beirut` among them shift at midnight itself — so midnight is a
+ * reference point that does not always exist, and a calendar built on it would
+ * lose exactly one day a year in those zones. Midday always exists: no zone has
+ * ever shifted by twelve hours.
+ */
+export function instantForCivilDate(date: CivilDate, timeZone: string): Date {
+  const midday = instantForWallClock(timeZone, date, 12 * 60);
+  if (midday !== null) return new Date(midday);
+
+  // Unreachable by the argument above, but the safe direction if tzdata ever
+  // proves it wrong is *some* instant on the right day, not a thrown render.
+  for (let minute = 0; minute < MINUTES_PER_DAY; minute += 1) {
+    const instant = instantForWallClock(timeZone, date, minute);
+    if (instant !== null) return new Date(instant);
+  }
+  throw new InvalidTimeZoneError(timeZone);
+}
+
+/** A calendar month, as the tenant's clock names it. */
+export interface CivilMonth {
+  year: number;
+  /** 1–12. */
+  month: number;
+}
+
+/** `month` shifted by `delta` months, rolling the year over correctly. */
+export function addCivilMonths(month: CivilMonth, delta: number): CivilMonth {
+  const shifted = new Date(Date.UTC(month.year, month.month - 1 + delta, 1));
+  return { year: shifted.getUTCFullYear(), month: shifted.getUTCMonth() + 1 };
+}
+
+/**
+ * The Sunday-first grid of civil dates covering `month`, padded to whole weeks —
+ * the cells a month view renders.
+ *
+ * Pure calendar arithmetic on civil dates, so the grid a tenant's guests see is
+ * the same grid in every browser on earth.
+ */
+export function civilMonthGrid(month: CivilMonth): CivilDate[] {
+  const firstOfMonth = Date.UTC(month.year, month.month - 1, 1);
+  const lastOfMonth = Date.UTC(month.year, month.month, 0);
+  const gridStart = firstOfMonth - new Date(firstOfMonth).getUTCDay() * DAY_MS;
+  const gridEnd = lastOfMonth + (6 - new Date(lastOfMonth).getUTCDay()) * DAY_MS;
+
+  const cells: CivilDate[] = [];
+  for (let key = gridStart; key <= gridEnd; key += DAY_MS) {
+    cells.push(civilFromKey(key));
+  }
+  return cells;
+}
+
+/**
  * The weekday (0 = Sunday … 6 = Saturday) that `instant` falls on in
  * `timeZone` — the value `rule.dayOfWeek` is matched against.
  *
- * `getUTCDay` on a `Date.UTC`-built date is a pure civil-calendar lookup: both
- * halves are UTC, so the process zone cannot reach it. That is the whole point
- * — `instant.getDay()` answered for the *server's* zone, which is how a Monday
+ * `instant.getDay()` answered for the *server's* zone, which is how a Monday
  * 22:00 appointment in Miami became a Tuesday on a UTC Vercel box.
  *
- * Exported so the guest calendar grid dims days with this exact function rather
- * than a second implementation of it (ALI-117 invariant (d): the grid's offered
- * set and the write path's re-validated set must agree by construction).
+ * ⚠️ Correct answer, easily misused: this asks "which tenant-zone day is this
+ * *moment* in", so it is only meaningful for an instant that means something —
+ * a slot's start, `now`. Handing it a **browser-local midnight** and treating
+ * the answer as a calendar cell's identity is the B1 defect described on
+ * `CivilDate`. For calendar cells, use `weekdayOfCivilDate` on a `CivilDate`.
  */
 export function weekdayInTimeZone(instant: Date, timeZone: string): number {
-  const { year, month, day } = civilDateInZone(timeZone, instant);
-  return new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  return weekdayOfCivilDate(civilDateInTimeZone(instant, timeZone));
 }
 
 /**
