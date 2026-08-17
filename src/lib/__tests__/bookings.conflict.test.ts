@@ -117,14 +117,28 @@ type InsertResult = { data: unknown; error: PostgrestError | null };
 
 /**
  * A Supabase client stub covering exactly the calls `createBooking` makes: the
- * `services` lookup, the identity `rpc`, and the `bookings` insert. Chainable
- * builders return themselves; only the terminal `maybeSingle`/`single` resolve.
+ * `services` lookup, the identity `rpc`, the identity read-back, and the
+ * `bookings` insert. Chainable builders return themselves; only the terminal
+ * `maybeSingle`/`single` resolve.
  */
 function stubSupabase(insertResult: InsertResult): SupabaseClient {
   const services = {
     select: () => services,
     eq: () => services,
     maybeSingle: async () => ({ data: SERVICE_ROW, error: null }),
+  };
+
+  // ALI-167: after resolving the identity, the write path reads it back so what
+  // the request supplied can be recorded on the booking. Stubbed to return the
+  // guest's own details, i.e. nothing diverges — this suite is about the
+  // insert's error handling, and `custom_fields` must not be what decides it.
+  const endCustomers = {
+    select: () => endCustomers,
+    eq: () => endCustomers,
+    maybeSingle: async () => ({
+      data: { id: END_CUSTOMER_ID, name: INPUT.guest.name, phone: null },
+      error: null,
+    }),
   };
 
   const bookings = {
@@ -134,7 +148,11 @@ function stubSupabase(insertResult: InsertResult): SupabaseClient {
   };
 
   return {
-    from: (table: string) => (table === "services" ? services : bookings),
+    from: (table: string) => {
+      if (table === "services") return services;
+      if (table === "end_customers") return endCustomers;
+      return bookings;
+    },
     rpc: async () => ({ data: END_CUSTOMER_ID, error: null }),
   } as unknown as SupabaseClient;
 }

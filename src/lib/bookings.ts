@@ -12,7 +12,82 @@ import {
   getBlockedSlots,
   getUpcomingBookings,
 } from "@/lib/tenants";
-import type { Booking, CreateBookingInput } from "@/lib/types";
+import type {
+  Booking,
+  CreateBookingInput,
+  CustomFields,
+  GuestSupplied,
+} from "@/lib/types";
+
+/**
+ * The reserved `custom_fields` key the **server** owns (ALI-167).
+ *
+ * `custom_fields` is browser-supplied end to end — `request.customFields` is
+ * passed straight through by `createBookingAction` — so this key has to be
+ * server-authoritative or it proves nothing. A browser value for it is
+ * discarded, never merged: see `withGuestSupplied`.
+ */
+export const GUEST_SUPPLIED_FIELD = "guest_supplied";
+
+/** The `end_customers` projection the write path reads back after resolving. */
+interface EndCustomerIdentityRow {
+  id: string;
+  name: string;
+  phone: string | null;
+}
+
+/** A value the request actually supplied, as `resolve_or_create_end_customer` judges it. */
+function supplied(value: string | null | undefined): string | null {
+  // Mirrors `nullif(excluded.name, '')` in 0003/0007: the empty string is
+  // "supplied nothing", and nothing else is. Deliberately no trimming — the SQL
+  // does none, and a mirror that normalises more than the original is a mirror
+  // that disagrees with it.
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+/**
+ * What this request supplied for the guest, kept only where it **differs** from
+ * the identity the RPC resolved to.
+ *
+ * Returns `null` when there is nothing to record, which is the case on first
+ * contact without any need to ask whether the identity pre-existed: 0007
+ * creates the row *from* the supplied values, so supplied and stored are equal
+ * by construction and every leg falls away. That is why this is a pure
+ * comparison rather than a second round trip asking "was it already there?".
+ */
+export function diffGuestSupplied(
+  request: { name?: string | null; phone?: string | null },
+  stored: { name: string | null; phone: string | null },
+): GuestSupplied | null {
+  const record: GuestSupplied = {};
+
+  const name = supplied(request.name);
+  if (name !== null && name !== stored.name) record.name = name;
+
+  const phone = supplied(request.phone);
+  if (phone !== null && phone !== stored.phone) record.phone = phone;
+
+  return Object.keys(record).length > 0 ? record : null;
+}
+
+/**
+ * Merge the server's `guest_supplied` into browser-supplied `custom_fields`.
+ *
+ * The browser's own value for the reserved key is **always** dropped first —
+ * including when the server has nothing to record. Merging the two, or
+ * defaulting to the browser's when the server is silent, would let a request
+ * that supplied `name: 'Bob'` ship `guest_supplied: { name: 'Alice' }` and make
+ * the per-booking record lie in exactly the way the identity no longer can.
+ */
+export function withGuestSupplied(
+  customFields: CustomFields,
+  guestSupplied: GuestSupplied | null,
+): CustomFields {
+  const merged: CustomFields = { ...customFields };
+  delete merged[GUEST_SUPPLIED_FIELD];
+  if (guestSupplied !== null) merged[GUEST_SUPPLIED_FIELD] = guestSupplied;
+  return merged;
+}
 
 /**
  * Booking writes.
@@ -20,6 +95,15 @@ import type { Booking, CreateBookingInput } from "@/lib/types";
  * Resolves-or-creates the guest's identity (`end_customers`) by email, then
  * inserts a `status='pending'` booking referencing `end_customer_id` and storing
  * per-vertical `custom_fields`. No payment here — Stripe lands with ALI-27.
+ *
+ * ## Resolving an identity never mutates it (ALI-167)
+ *
+ * `createBookingAction` is a public unauthenticated endpoint and nothing on
+ * this path proves the requester controls the email they typed, so an existing
+ * guest's stored `name`/`phone` are immutable to it — enforced in SQL by
+ * migration 0007, not here, because the phone leg is unreachable from
+ * application code. What the request supplied is recorded on the booking
+ * instead, under the reserved `custom_fields.guest_supplied` key.
  *
  * ## `input.customerId` must already be server-resolved (ALI-139)
  *
@@ -98,6 +182,39 @@ export async function createBooking(
   );
   if (identityError) throw identityError;
 
+  // Read back the identity this request resolved to, so what the request itself
+  // supplied can be recorded next to the booking (ALI-167). Since 0007 the RPC
+  // never mutates an existing row, so the supplied name/phone would otherwise
+  // be discarded silently — and that is the same release-0.1 failure from the
+  // other side: the owner reads the dashboard, sees "Alice", and has no trace
+  // that Bob is the one arriving.
+  //
+  // Deliberately *after* the RPC, not folded into the availability reads above.
+  // Read before, and a concurrent first contact for the same email decides
+  // whether this request "resolved to a pre-existing identity" — the recording
+  // would be a coin flip. Read after, and `stored` is the authoritative value
+  // at the moment of resolution, which is what the criterion is about.
+  const { data: identity, error: identityReadError } = await supabase
+    .from("end_customers")
+    .select("id, name, phone")
+    .eq("customer_id", customerId)
+    .eq("id", endCustomerId as string)
+    .maybeSingle<EndCustomerIdentityRow>();
+  if (identityReadError) throw identityReadError;
+
+  // `phone: null` mirrors `p_phone: null` above — no call site collects a guest
+  // phone yet. When one does, both halves are already correct: the identity is
+  // protected in SQL (unbypassable) and the divergence is recorded here.
+  //
+  // If no identity row is readable — it was just resolved, so this should not
+  // happen — record nothing, but still drop the browser's reserved key below.
+  // The safe failure direction is a booking with no `guest_supplied`, never a
+  // rejected booking: refusing it would turn a data-integrity bug into a denial
+  // of service on a legitimate returning guest.
+  const guestSupplied = identity
+    ? diffGuestSupplied({ name: guest.name, phone: null }, identity)
+    : null;
+
   const { data: booking, error: insertError } = await supabase
     .from("bookings")
     .insert({
@@ -108,7 +225,7 @@ export async function createBooking(
       end_time: slot.end,
       notes: guest.notes ?? null,
       status: "pending",
-      custom_fields: customFields,
+      custom_fields: withGuestSupplied(customFields, guestSupplied),
     })
     .select(
       "id, customer_id, service_id, end_customer_id, start_time, end_time, notes, status, custom_fields",

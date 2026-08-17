@@ -5,6 +5,10 @@ import { createBookingAction } from "@/app/[customerSlug]/actions";
 import { generateDaySlots } from "@/lib/availability";
 import { createBooking } from "@/lib/bookings";
 import { createServiceRoleClient } from "@/lib/supabase/server";
+import {
+  fakeResolveOrCreateEndCustomer,
+  type FakeEndCustomerRow,
+} from "@/test/fake-identity-rpc";
 import type { CreateBookingInput, CreateBookingRequest } from "@/lib/types";
 
 /**
@@ -45,6 +49,13 @@ import type { CreateBookingInput, CreateBookingRequest } from "@/lib/types";
  *     does not exist, and the vulnerability could not be demonstrated at all.
  *   • **Every tenant scope is recorded**, so a test can assert the victim was
  *     never so much as queried — not merely that no row was written.
+ *   • **The identity RPC is modelled, not stubbed** (ALI-167). It lives in
+ *     `@/test/fake-identity-rpc`, stores `name`/`phone`, refuses to mutate an
+ *     existing row, and rejects a missing email (23502) or an unknown tenant
+ *     (23503) the way the real function does. The version inlined here before
+ *     ALI-167 returned the existing id and stored neither column — a fake of
+ *     the behaviour we wanted rather than the one that shipped, which is why
+ *     this suite stayed green on a live data-integrity bug.
  *
  * The database-level half of this issue — that Postgres really does accept a
  * cross-tenant `customer_id`, and what it costs the victim once ALI-98's
@@ -124,7 +135,10 @@ class FakeDatabase {
 
   readonly availability_rules: Row[] = [];
   readonly blocked_slots: Row[] = [];
-  readonly end_customers: Row[] = [];
+  // Typed as identity rows, not bare `Row`s: since ALI-167 the fake RPC stores
+  // `name`/`phone` here (it stored neither before), and the write path reads
+  // them back to decide what to record on the booking.
+  readonly end_customers: FakeEndCustomerRow[] = [];
   readonly bookings: Row[] = [];
 
   /** Every `customer_id` the app scoped a query, RPC or insert by, in order. */
@@ -256,19 +270,14 @@ function fakeSupabase(db: FakeDatabase): SupabaseClient {
     rpc: async (_fn: string, args: Record<string, unknown>) => {
       // `resolve_or_create_end_customer` — scoped by tenant, like the real one.
       db.noteScope(args.p_customer_id);
-      const customerId = args.p_customer_id as string;
-      const email = args.p_email as string;
-      const existing = db.end_customers.find(
-        (r) => r.customer_id === customerId && r.email === email,
-      );
-      if (existing) return { data: existing.id, error: null };
-      const created = {
-        id: `end-customer-${db.end_customers.length + 1}`,
-        customer_id: customerId,
-        email,
-      };
-      db.end_customers.push(created);
-      return { data: created.id, error: null };
+      // ALI-167: this used to be an inline "find the row, return its id" that
+      // stored neither `name` nor `phone`. That described the behaviour we
+      // *wanted* rather than the one shipped — the real function overwrote the
+      // stored name — so this whole suite passed on the vulnerable code and
+      // could not have failed on the bug. The semantics now live in one place,
+      // modelled once and pinned against a live Postgres by
+      // `src/test/__tests__/guest-identity.db.test.ts`.
+      return fakeResolveOrCreateEndCustomer(db, args);
     },
   } as unknown as SupabaseClient;
 }
