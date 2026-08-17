@@ -14,6 +14,7 @@ import {
 } from "@/lib/tenants";
 import type {
   Booking,
+  BookingStatus,
   CreateBookingInput,
   CustomFields,
   GuestSupplied,
@@ -90,11 +91,45 @@ export function withGuestSupplied(
 }
 
 /**
+ * The status a new booking is inserted with, decided by its price (ALI-176
+ * criterion 4).
+ *
+ * A free service has nothing left to wait for, so it is `confirmed` on insert.
+ * A paid one stays `pending` until payment succeeds — that transition is
+ * ALI-27/ALI-70's, and inserting a paid booking as `confirmed` would confirm a
+ * meeting nobody has paid for.
+ *
+ * ## `confirmed` still occupies the slot
+ *
+ * This changes *which* live status the row carries, never whether the row is
+ * live. `bookings_no_overlap` (migration 0006) exempts `status <> 'cancelled'`
+ * and `getUpcomingBookings` subtracts the same set — `SLOT_FREEING_STATUS` in
+ * `src/lib/tenants.ts` — so `pending` and `confirmed` are equally occupying on
+ * both sides. Were that not true, the free flow would either offer ghost slots
+ * the database then refuses, or silently double-book.
+ * `booking-overlap.db.test.ts` asserts the two sets are identical, derived from
+ * the live schema; `free-service-status.db.test.ts` asserts the status this
+ * function returns is inside them.
+ *
+ * ## Why a function and not an inline ternary
+ *
+ * ALI-69's confirmation email fires on `confirmed` ("post-payment, or
+ * immediately for free services"), so this predicate is the trigger condition
+ * for a side effect that reaches a real person. Naming it gives that rule one
+ * definition and one place to test.
+ */
+export function initialBookingStatus(priceCents: number): BookingStatus {
+  return priceCents === 0 ? "confirmed" : "pending";
+}
+
+/**
  * Booking writes.
  *
  * Resolves-or-creates the guest's identity (`end_customers`) by email, then
- * inserts a `status='pending'` booking referencing `end_customer_id` and storing
- * per-vertical `custom_fields`. No payment here — Stripe lands with ALI-27.
+ * inserts a booking referencing `end_customer_id` and storing per-vertical
+ * `custom_fields`. The status comes from `initialBookingStatus` — `confirmed`
+ * for a free service, `pending` for a paid one, whose payment lands with
+ * ALI-27.
  *
  * ## Resolving an identity never mutates it (ALI-167)
  *
@@ -224,7 +259,10 @@ export async function createBooking(
       start_time: slot.start,
       end_time: slot.end,
       notes: guest.notes ?? null,
-      status: "pending",
+      // From the service row read above — the tenant's own price, never a
+      // browser-supplied one. `service` is already scoped to `customerId`, so a
+      // request cannot name another tenant's free service to skip payment.
+      status: initialBookingStatus(service.price_cents),
       custom_fields: withGuestSupplied(customFields, guestSupplied),
     })
     .select(

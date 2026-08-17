@@ -5,7 +5,13 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-/** Format a price stored in integer cents as a localized currency string. */
+/**
+ * Format a monetary **amount** stored in integer cents as a localized currency
+ * string. Zero formats as a real amount (`$0`), which is correct for an amount:
+ * a dashboard reporting revenue of zero must say `$0`, not "Free".
+ *
+ * For a service's price, use `formatServicePrice` instead.
+ */
 export function formatPrice(
   cents: number,
   currency = "USD",
@@ -16,6 +22,31 @@ export function formatPrice(
     currency,
     minimumFractionDigits: cents % 100 === 0 ? 0 : 2,
   }).format(cents / 100);
+}
+
+/** What a `price_cents = 0` service is labelled, everywhere a price is shown. */
+export const FREE_PRICE_LABEL = "Free";
+
+/**
+ * Format a **service's price**, where zero means the service is free
+ * (ALI-176 criterion 5).
+ *
+ * Release 0.1's two services are both `price_cents = 0`, so this is the label a
+ * real visitor reads on the first live booking page. `$0` is well-formed but
+ * wrong copy: it reads as a transaction of nothing rather than as "no payment
+ * needed", and it sits next to a flow that asks for no card. Anything non-zero
+ * is unchanged — same currency, same locale, same rounding as `formatPrice`.
+ *
+ * Deliberately separate from `formatPrice` rather than a zero-case inside it:
+ * the two callers mean different things by zero. `formatPrice` also renders
+ * *amounts* (the admin's booked-revenue KPI), where "Free" would be nonsense.
+ */
+export function formatServicePrice(
+  cents: number,
+  currency = "USD",
+  locale = "en-US",
+): string {
+  return cents === 0 ? FREE_PRICE_LABEL : formatPrice(cents, currency, locale);
 }
 
 /** Human-friendly duration, e.g. 90 -> "1 hr 30 min", 45 -> "45 min". */

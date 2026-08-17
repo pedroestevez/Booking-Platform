@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { buildIcs, icsFilename } from "@/lib/ics";
 import type { GuestDetails, Service, Tenant, TimeSlot } from "@/lib/types";
-import { formatPrice } from "@/lib/utils";
+import { formatServicePrice } from "@/lib/utils";
 
 interface BookingConfirmationProps {
   tenant: Tenant;
@@ -88,7 +88,7 @@ export function BookingConfirmation({
           <div className="flex justify-between">
             <dt className="text-muted-foreground">Total</dt>
             <dd className="font-medium tabular-nums">
-              {formatPrice(service.priceCents, tenant.branding.currency)}
+              {formatServicePrice(service.priceCents, tenant.branding.currency)}
             </dd>
           </div>
         </dl>

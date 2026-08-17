@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/card";
 import { resolveAdminContext } from "@/lib/admin/auth";
 import { listServices } from "@/lib/admin/config";
-import { formatDuration, formatPrice } from "@/lib/utils";
+import { formatDuration, formatServicePrice } from "@/lib/utils";
 import {
   createServiceAction,
   setServiceActiveAction,
@@ -78,7 +78,7 @@ export default async function AdminServicesPage() {
                   </CardTitle>
                   <CardDescription>
                     {formatDuration(service.durationMinutes)} ·{" "}
-                    {formatPrice(service.priceCents, currency)}
+                    {formatServicePrice(service.priceCents, currency)}
                   </CardDescription>
                 </div>
                 <form

@@ -3,7 +3,7 @@
 import { ArrowRight, Clock } from "lucide-react";
 
 import type { Service, TenantBranding } from "@/lib/types";
-import { cn, formatDuration, formatPrice } from "@/lib/utils";
+import { cn, formatDuration, formatServicePrice } from "@/lib/utils";
 
 interface ServiceSelectorProps {
   services: Service[];
@@ -49,7 +49,7 @@ export function ServiceSelector({
                   {service.name}
                 </h3>
                 <span className="shrink-0 font-semibold tabular-nums">
-                  {formatPrice(service.priceCents, branding.currency)}
+                  {formatServicePrice(service.priceCents, branding.currency)}
                 </span>
               </div>
               <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">

@@ -77,6 +77,83 @@ project's URL/keys in `.env.local` to run (see `.env.example`) — a raw
 Playwright e2e job in CI is unchanged by this: it still targets a real
 Supabase preview project via repository secrets.
 
+## Provisioning a real tenant (ALI-176)
+
+`scripts/provision-tenant.mjs` provisions **one** tenant — its `customers` row,
+its `services`, and its `availability_rules` — from values passed in. It is the
+mechanism ALI-177 P5 fires at production once Pedro confirms P4's content
+inputs; **nothing in ALI-176 runs it against production**.
+
+```bash
+# Required. Must name BOTH a host and a database — there is no fallback, and a
+# degenerate value like `postgres://` is rejected rather than completed from the
+# ambient PGHOST/PGUSER/PGDATABASE. Needs a role with BYPASSRLS (see below).
+export PROVISION_DATABASE_URL='postgresql://user:pass@host:5432/dbname'
+
+# Always dry-run first: does every read and write, then rolls back.
+node scripts/provision-tenant.mjs --dry-run
+
+# The P4 draft, with each value overridable. --confirm is required to commit.
+node scripts/provision-tenant.mjs --confirm \
+  --slug pedroestevez --name 'Pedro Estevez' \
+  --timezone America/New_York --currency USD \
+  --service 'Interview — 30 min|30|0' \
+  --service 'Intro consultation — 30 min|30|0' \
+  --rule '1-5|10:00|18:00|15'
+
+node scripts/provision-tenant.mjs --help     # full flag list
+node scripts/provision-tenant.mjs --spec tenant.json --confirm
+```
+
+Five properties matter more than the flags:
+
+- **It deletes nothing.** `customers` is matched on its unique `slug`,
+  `services` on `(customer_id, name)`, `availability_rules` on
+  `(customer_id, day_of_week, start_time, end_time)`; each match is an update,
+  each miss an insert. Rows the spec does not mention are reported and left in
+  place. This is why it is a separate script from `scripts/seed-test-tenant.mjs`,
+  whose convergence is `delete from services` — fine for a throwaway CI
+  database, data loss for a real tenant (and blocked outright by
+  `bookings.service_id`'s `on delete restrict` the moment one booking exists).
+- **The defaults are a CREATE template, not an UPDATE instruction.** On a tenant
+  that already exists, only what *this invocation* supplied is written: an
+  unsupplied `branding_json` key, `name`, service list or rule list is left
+  byte-identical. The built-in P4 draft fills a tenant being created and nothing
+  else. Without that distinction every re-run rewrote `timezone`, `currency`,
+  `brandColor` and `name` from the draft — silently moving every slot and every
+  confirmed booking for an owner who had corrected their timezone. Deleting
+  nothing is not enough; a converging writer must also preserve every column it
+  does not mean to write.
+- **It fails closed on the connection.** `PROVISION_DATABASE_URL` and nothing
+  else: no `DATABASE_URL`, no `TEST_DATABASE_URL`, no localhost default, and no
+  completing a partial URL from `PG*`. Unset or degenerate means a non-zero exit
+  before a socket opens. After connecting it also compares `current_database()`
+  with the database the variable named and refuses to write on a mismatch. The
+  connection string itself is never printed — it can carry a credential in the
+  userinfo *or* in a `?password=` parameter — so the run reports `database=`,
+  `role=` and `bypassrls=` from the server instead.
+- **Committing is opt-in.** `--dry-run` writes nothing; anything else needs
+  `--confirm`. And creating a tenant under a slug other than the draft's
+  requires explicit `--service` and `--rule`: inheriting the draft's free,
+  active services would publish a bookable calendar nobody configured, and a
+  free service books as `confirmed`.
+- **It validates before it connects.** Slug shape, IANA timezone, ISO 4217
+  currency, `duration_minutes > 0`, `price_cents >= 0`, `day_of_week` 0–6,
+  `start_time < end_time`, `buffer_minutes >= 0`, and no duplicate convergence
+  keys. The numeric rules mirror migration 0001's CHECK constraints, so an
+  invalid spec is rejected with a named field instead of a driver error — and
+  `src/test/__tests__/provision-tenant.db.test.ts` asserts Postgres rejects the
+  same rows, so the two cannot drift apart silently.
+
+**Run it with a `BYPASSRLS` role.** `0002_rls_policies.sql` uses `force row
+level security`, which applies the policies to the table owner too — so
+ownership is *not* sufficient. The tenant lookup by slug necessarily runs before
+`app.current_customer_id` can be set (the id is what it is looking up), so a
+role without `BYPASSRLS` sees no rows, takes the create path, and fails on the
+unique `slug` with a 23505. That is fail-closed and self-diagnosing, but it
+cannot converge: a re-run against production needs `BYPASSRLS` (CI's superuser,
+Supabase's `postgres`). The script warns at startup when the role lacks it.
+
 ## Tenancy & security model
 
 Every row is isolated by `customer_id`. The non-negotiables from `CLAUDE.md`:
