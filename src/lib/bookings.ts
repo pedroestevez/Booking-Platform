@@ -15,6 +15,7 @@ import {
 import {
   getAvailabilityRules,
   getBlockedSlots,
+  getTenantTimeZone,
   getUpcomingBookings,
 } from "@/lib/tenants";
 import type {
@@ -190,16 +191,25 @@ export async function createBooking(
   // Re-validate the chosen slot against current availability so a stale client
   // can't book a time that's been taken or blocked since the page loaded.
   const day = new Date(slot.start);
-  const [rules, blocked, bookings] = await Promise.all([
+  const [timeZone, rules, blocked, bookings] = await Promise.all([
+    getTenantTimeZone(customerId),
     getAvailabilityRules(customerId),
     getBlockedSlots(customerId),
     getUpcomingBookings(customerId),
   ]);
 
+  // The zone comes from the tenant's own row, keyed by the already-resolved
+  // `customerId` above — never from `input`, and never from the browser-supplied
+  // `customFields` riding along inside it (ALI-117 criterion 7 / ALI-139). It
+  // decides which wall-clock times exist at all, so a request that could set it
+  // could slide the whole window and be offered a time the business never
+  // opened. `generateDaySlots` has no default zone, so there is no third
+  // possibility where this quietly becomes UTC.
   const open = generateDaySlots({
     day,
     rules,
     service: { durationMinutes: service.duration_minutes },
+    timeZone,
     blocked,
     bookings,
   });

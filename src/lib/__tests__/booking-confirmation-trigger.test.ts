@@ -35,6 +35,10 @@ vi.mock("@/lib/tenants", () => ({
   getAvailabilityRules: vi.fn(async () => []),
   getBlockedSlots: vi.fn(async () => []),
   getUpcomingBookings: vi.fn(async () => []),
+  // ALI-117: the write path resolves the tenant's zone server-side before the
+  // availability re-check. `generateDaySlots` is mocked below, so this only has
+  // to exist — what it returns never reaches any arithmetic in this suite.
+  getTenantTimeZone: vi.fn(async () => "UTC"),
 }));
 
 vi.mock("@/lib/availability", () => ({

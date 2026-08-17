@@ -20,6 +20,7 @@ import { CalendarOff, ChevronLeft, ChevronRight } from "lucide-react";
 import {
   availableWeekdays,
   generateDaySlots,
+  weekdayInTimeZone,
 } from "@/lib/availability";
 import type {
   AvailabilityRule,
@@ -70,16 +71,28 @@ export function AvailabilityCalendar({
       day: selectedDay,
       rules,
       service,
+      // The business's zone, not the visitor's browser's. Passing it here is
+      // half of the no-ghost-slots guarantee: `createBooking` re-validates the
+      // chosen slot with the same function and the same zone, resolved
+      // server-side, so the set offered and the set accepted are the same set.
+      timeZone: branding.timezone,
       blocked,
       bookings,
     });
-  }, [selectedDay, rules, service, blocked, bookings]);
+  }, [selectedDay, rules, service, branding.timezone, blocked, bookings]);
 
   const canGoBack = !isSameMonth(visibleMonth, today);
 
   function isDayBookable(day: Date): boolean {
     if (isBefore(day, today)) return false;
-    if (!openWeekdays.has(day.getDay())) return false;
+    // The tenant's weekday, not the visitor's. `day.getDay()` here dimmed days
+    // by whatever zone the browser happened to be in, so a grid could offer
+    // Tuesday to a visitor in Auckland for a business that only opens Mondays —
+    // and then generate the Monday slots anyway. Same function the slot engine
+    // uses, so the two cannot drift apart.
+    if (!openWeekdays.has(weekdayInTimeZone(day, branding.timezone))) {
+      return false;
+    }
     return true;
   }
 

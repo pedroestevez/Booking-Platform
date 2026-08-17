@@ -73,6 +73,11 @@ vi.mock("@/lib/tenants", () => ({
   getAvailabilityRules: vi.fn(async () => []),
   getBlockedSlots: vi.fn(async () => []),
   getUpcomingBookings: vi.fn(async () => []),
+  // ALI-117: the write path resolves the tenant's zone server-side before the
+  // availability re-check. `TENANT.branding.timezone` below is the same "UTC",
+  // restated here because a `vi.mock` factory cannot reach this module's
+  // constants (see the note on `getTenantBySlug`).
+  getTenantTimeZone: vi.fn(async () => "UTC"),
   // ALI-139: the action now resolves the tenant from the slug before it writes
   // anything, so this suite would not reach the insert without it. The
   // implementation is attached in `arrangeInsertFailure` rather than here —
