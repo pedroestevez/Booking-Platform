@@ -5,7 +5,7 @@ import { CalendarPlus, Check } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { buildIcs, icsFilename } from "@/lib/ics";
+import { buildIcs, icsFilename, icsUid } from "@/lib/ics";
 import type { GuestDetails, Service, Tenant, TimeSlot } from "@/lib/types";
 import { formatServicePrice } from "@/lib/utils";
 
@@ -34,7 +34,10 @@ export function BookingConfirmation({
     if (guest.notes) descriptionParts.push(guest.notes);
 
     const ics = buildIcs({
-      uid: `${bookingId ?? crypto.randomUUID()}@booking-platform`,
+      // The same UID the confirmation email's attachment carries (ALI-69), so a
+      // guest who both clicks this button and opens the email ends up with one
+      // appointment rather than two.
+      uid: icsUid(bookingId ?? crypto.randomUUID()),
       start: slot.start,
       end: slot.end,
       summary: `${service.name} with ${tenant.name}`,
@@ -103,7 +106,7 @@ export function BookingConfirmation({
         Add to calendar
       </Button>
       <p className="mt-2 text-xs text-muted-foreground">
-        Online payment and email confirmations arrive in an upcoming release.
+        Online payment arrives in an upcoming release.
       </p>
 
       <Button variant="ghost" onClick={onBookAnother} className="mt-5">
