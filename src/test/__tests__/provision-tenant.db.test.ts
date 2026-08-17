@@ -53,9 +53,17 @@ const SLUG_PREFIX = "ali176-provision";
 const SLUG = `${SLUG_PREFIX}-${process.pid}`;
 /** A slug this suite never provisions — used to prove a rejected run wrote nothing. */
 const NEVER_PROVISIONED_SLUG = `${SLUG_PREFIX}-never-${process.pid}`;
+/** A second, non-draft tenant, for the "does not inherit the draft catalogue" case. */
+const NON_DRAFT_SLUG = `${SLUG_PREFIX}-acme-${process.pid}`;
 
-/** The spec every successful run below provisions, all values passed as input. */
+/**
+ * The spec every successful run below provisions, all values passed as input.
+ *
+ * `--confirm` is part of it because committing is opt-in since the security
+ * pass (S4): a bare invocation must not be a complete production write.
+ */
 const BASE_ARGS = [
+  "--confirm",
   "--slug",
   SLUG,
   "--name",
@@ -262,6 +270,99 @@ describe.skipIf(!hasTestDatabase)("provision-tenant.mjs", () => {
     expect(bookingsAfter[0]!.service_id).toBe(bookedService.id);
   });
 
+  // ── Criterion 1, column preservation (security pass round 1, S1) ──────────
+  /**
+   * The round-1 blocker, and the generalised lesson with it: **a converging
+   * writer must be tested for preservation of every column it writes, not only
+   * for row-count and row-id stability.**
+   *
+   * The first round's teeth asserted that `bookings` and `end_customers` rows
+   * survive, and they did. One column over, every re-run silently rewrote
+   * `branding_json.timezone`, `currency`, `brandColor` and `name` — because the
+   * P4 draft sat at the floor of the precedence chain and was therefore never
+   * "absent from the spec", so the `||` merge that protects an unmentioned
+   * `logoUrl` protected none of them. An owner who corrected their timezone in
+   * `/admin` had it reset by the next `--service` run: every slot and every
+   * already-`confirmed` booking shifted, exit 0, no warning.
+   *
+   * So this asserts the whole row, not a chosen key: `branding_json` is compared
+   * as its **serialized text**, which is what makes "byte-identical" literal
+   * rather than a spot-check of the keys someone thought to name.
+   */
+  it("preserves every branding key and column the invocation did not supply", async () => {
+    const customerId = await tenantIdBySlug(SLUG);
+    expect(customerId).toBeDefined();
+    await setTenant(customerId!);
+
+    // Stand in for the owner editing their own configuration after
+    // provisioning: a non-default timezone, a hand-set logo, a custom colour, a
+    // different currency, and a display name nobody passed on the command line.
+    await query(
+      `update public.customers
+          set name = $2,
+              branding_json = branding_json || $3::jsonb
+        where id = $1`,
+      [
+        customerId,
+        "Owner Edited Name",
+        JSON.stringify({
+          timezone: "America/Los_Angeles",
+          currency: "EUR",
+          brandColor: "oklch(0.7 0.2 30)",
+          logoUrl: "https://cdn.example.test/logo.png",
+        }),
+      ],
+    );
+
+    const [before] = await query<{ branding: string; name: string }>(
+      "select branding_json::text as branding, name from public.customers where id = $1",
+      [customerId],
+    );
+
+    // A re-run that supplies nothing about the tenant itself — the documented,
+    // expected way to touch the catalogue and nothing else.
+    const rerun = await run(["--confirm", "--slug", SLUG], provisioningEnv());
+    expect(rerun.code, rerun.stderr).toBe(0);
+
+    const [after] = await query<{ branding: string; name: string }>(
+      "select branding_json::text as branding, name from public.customers where id = $1",
+      [customerId],
+    );
+
+    expect(after!.branding).toBe(before!.branding);
+    expect(after!.name).toBe(before!.name);
+    // And it says so, rather than reporting a write it did not make.
+    expect(rerun.stdout).toContain("tenant unchanged");
+
+    // The catalogue is not silently rewritten either: an unsupplied service list
+    // means "leave it", not "converge it to the draft". Same failure, one table
+    // over — a run meant to fix a tagline would otherwise reset every price.
+    expect(rerun.stdout).toContain("no services supplied");
+    expect(rerun.stdout).toContain("no availability rules supplied");
+
+    // The discriminating control: preservation must not be "the script does
+    // nothing". Supplying one key writes exactly that key and leaves the rest.
+    const targeted = await run(
+      ["--confirm", "--slug", SLUG, "--timezone", "Europe/Madrid"],
+      provisioningEnv(),
+    );
+    expect(targeted.code, targeted.stderr).toBe(0);
+
+    const [patched] = await query<{ branding: Record<string, string>; name: string }>(
+      "select branding_json as branding, name from public.customers where id = $1",
+      [customerId],
+    );
+    expect(patched!.branding.timezone).toBe("Europe/Madrid");
+    expect(patched!.branding.currency).toBe("EUR");
+    expect(patched!.branding.brandColor).toBe("oklch(0.7 0.2 30)");
+    expect(patched!.branding.logoUrl).toBe("https://cdn.example.test/logo.png");
+    expect(patched!.name).toBe("Owner Edited Name");
+
+    // Restore the fixture for the tests that follow.
+    const restored = await run(BASE_ARGS, provisioningEnv());
+    expect(restored.code, restored.stderr).toBe(0);
+  });
+
   it("updates an edited spec in place rather than adding rows", async () => {
     const customerId = await tenantIdBySlug(SLUG);
     expect(customerId).toBeDefined();
@@ -271,6 +372,7 @@ describe.skipIf(!hasTestDatabase)("provision-tenant.mjs", () => {
 
     const edited = await run(
       [
+        "--confirm",
         "--slug",
         SLUG,
         "--name",
@@ -345,6 +447,57 @@ describe.skipIf(!hasTestDatabase)("provision-tenant.mjs", () => {
     expect(await tenantIdBySlug(NEVER_PROVISIONED_SLUG)).toBeUndefined();
   });
 
+  // ── Criterion 1 / S4: creating is opt-in, and never inherits the draft ────
+  it("refuses to commit without --confirm", async () => {
+    // A bare invocation used to be a complete, valid production write.
+    const result = await run(
+      BASE_ARGS.filter((a) => a !== "--confirm"),
+      provisioningEnv(),
+    );
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("--confirm");
+    expect(result.stderr).toContain("Nothing was written.");
+  });
+
+  it("refuses to create a non-draft tenant from the draft catalogue", async () => {
+    // The S4 scenario exactly: a new tenant, a name, and a forgotten --service.
+    // Inheriting the draft would give them two active `price_cents = 0`
+    // services — which, since criterion 4, book as `confirmed` — on a calendar
+    // nobody configured.
+    const result = await run(
+      ["--confirm", "--slug", NON_DRAFT_SLUG, "--name", "Acme Legal"],
+      provisioningEnv(),
+    );
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("--service");
+    expect(await tenantIdBySlug(NON_DRAFT_SLUG)).toBeUndefined();
+
+    // Supplying them explicitly is allowed — the refusal is about inheritance,
+    // not about non-draft tenants.
+    const explicit = await run(
+      [
+        "--confirm",
+        "--slug",
+        NON_DRAFT_SLUG,
+        "--name",
+        "Acme Legal",
+        "--service",
+        "Consultation|60|15000",
+        "--rule",
+        "2|09:00|17:00|0",
+      ],
+      provisioningEnv(),
+    );
+    expect(explicit.code, explicit.stderr).toBe(0);
+    const acmeId = await tenantIdBySlug(NON_DRAFT_SLUG);
+    expect(acmeId).toBeDefined();
+    const acmeServices = await servicesOf(acmeId!);
+    expect(acmeServices.map((s) => s.name)).toEqual(["Consultation"]);
+    expect(acmeServices[0]!.price_cents).toBe(15000);
+  });
+
   // ── Criterion 2 ────────────────────────────────────────────────────────────
   it("fails closed with no connection variable, and never falls back", async () => {
     // Both variables a careless script might reach for are present and point at
@@ -362,6 +515,96 @@ describe.skipIf(!hasTestDatabase)("provision-tenant.mjs", () => {
     // Nothing written, which is what makes criterion 1's idempotency test unable
     // to reach a database it was not deliberately pointed at.
     expect(await tenantIdBySlug(NEVER_PROVISIONED_SLUG)).toBeUndefined();
+  });
+
+  /**
+   * Criterion 2, the set-but-degenerate case (security pass round 1, S2).
+   *
+   * `if (!databaseUrl)` only proves the variable is non-empty. `postgres://` is
+   * truthy, and node-postgres then fills host, user and database from ambient
+   * `PGHOST`/`PGUSER`/`PGDATABASE` — a fallback by another name, and exactly
+   * what the guard's own error text promises does not happen. The realistic
+   * shape is a secret template that renders empty (`postgres://$DB_SECRET` with
+   * the secret unset) inside a container whose `PG*` point at production.
+   */
+  it.each([
+    ["no host", "postgres://"],
+    ["no host but a database", "postgres:///somedb"],
+    ["no database", "postgres://127.0.0.1:5432"],
+    ["not a URL at all", "this is not a url"],
+    ["the wrong scheme", "mysql://127.0.0.1:5432/somedb"],
+  ])(
+    "refuses a connection variable naming %s, with PG* pointed at a live database",
+    async (_label, value) => {
+      const ambient = new URL(TEST_DATABASE_URL!);
+      const result = await run(
+        [...BASE_ARGS, "--slug", NEVER_PROVISIONED_SLUG],
+        {
+          PROVISION_DATABASE_URL: value,
+          // A live, working target reachable entirely from libpq's env vars.
+          PGHOST: ambient.hostname,
+          PGPORT: ambient.port,
+          PGUSER: decodeURIComponent(ambient.username),
+          PGPASSWORD: decodeURIComponent(ambient.password),
+          PGDATABASE: ambient.pathname.replace(/^\//, ""),
+        },
+      );
+
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain("PROVISION_DATABASE_URL");
+      expect(result.stderr).toContain("Nothing was written.");
+      // The assertion that matters: no tenant reached the database the variable
+      // never named.
+      expect(await tenantIdBySlug(NEVER_PROVISIONED_SLUG)).toBeUndefined();
+    },
+  );
+
+  /**
+   * The connection string never reaches a log (security pass round 1, S3).
+   *
+   * `redact()` rewrote `url.password` — the `user:pass@host` userinfo form — but
+   * libpq and `pg-connection-string` also accept `?password=`, which sailed
+   * through and printed a working credential on line 1 of stdout, into CI job
+   * logs and any log shipper. Secrets live in env, never in logs.
+   */
+  it("never prints a credential carried in the connection string", async () => {
+    const ambient = new URL(TEST_DATABASE_URL!);
+    const password = decodeURIComponent(ambient.password);
+    const queryParamUrl =
+      `postgresql://${ambient.username}@${ambient.hostname}:${ambient.port}` +
+      `${ambient.pathname}?password=${encodeURIComponent(password)}`;
+
+    const result = await run(
+      [...BASE_ARGS, "--slug", NEVER_PROVISIONED_SLUG, "--dry-run"],
+      { PROVISION_DATABASE_URL: queryParamUrl },
+    );
+
+    // It authenticated — otherwise "no credential in the output" would be true
+    // for the boring reason that nothing worked, and the test would pass
+    // forever while proving nothing.
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain("connected to database=");
+    expect(password).not.toBe("");
+
+    const output = `${result.stdout}\n${result.stderr}`;
+
+    // Asserted as "no connection string is printed" rather than "this password
+    // string is absent", deliberately. Scanning for the value alone is unstable
+    // in both directions — a harness password may legitimately equal another
+    // token in the output (locally it equals the role name), and a *redacted*
+    // URL would pass a value-scan while still publishing the host, user and
+    // database. No scheme token means no URL in any form, which is the property
+    // that actually holds the guarantee, and it covers the `?password=` form
+    // `redact()` missed as well as the `user:pass@host` form it handled.
+    expect(output).not.toMatch(/postgres(ql)?:\/\//);
+    expect(output).not.toContain("password");
+    expect(output).not.toContain(queryParamUrl);
+
+    // What an operator actually needs is reported instead, and from the server's
+    // own answer rather than from the string they typed.
+    expect(result.stdout).toContain(
+      `database=${ambient.pathname.replace(/^\//, "")}`,
+    );
   });
 
   // ── Faithful rejection: the script refuses what the database refuses ───────
