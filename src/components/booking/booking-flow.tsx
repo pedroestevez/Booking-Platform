@@ -87,7 +87,9 @@ export function BookingFlow({
     setSubmitting(true);
 
     // Persist the booking: resolves-or-creates the guest identity and reserves
-    // the slot (status 'pending'). Payment + invite arrive with Stripe (ALI-27).
+    // the slot. The server decides the status from the service's own price —
+    // 'confirmed' for a free service, 'pending' for a paid one (ALI-176) —
+    // and payment for the paid case arrives with Stripe (ALI-27).
     //
     // The tenant is identified by its public **slug**, not by `tenant.id`: the
     // server re-resolves the slug against the database and scopes every write

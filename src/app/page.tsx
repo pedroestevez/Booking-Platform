@@ -3,18 +3,31 @@ import { ArrowRight, CalendarCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { tenantIndexEnabled } from "@/lib/tenant-index";
 import { getAllTenants } from "@/lib/tenants";
+import type { Tenant } from "@/lib/types";
 
-// Reads tenants from Supabase at request time.
+/**
+ * Kept `force-dynamic` deliberately, even though the production render below
+ * reads nothing (ALI-176 criterion 3). The route is rendered per request, so no
+ * build can ever bake a tenant list into a static artifact — if the gate is one
+ * day loosened, the blast radius stays "this request", not "every request until
+ * the next deploy". The gated-off path issues no query, so there is nothing to
+ * cache anyway.
+ */
 export const dynamic = "force-dynamic";
 
 /**
- * Platform root. This app is normally addressed per tenant at `/<slug>`; this
- * page is an internal index that links to the tenants so the multi-tenant,
- * white-label behavior is easy to see during development.
+ * Platform root. This app is addressed per tenant at `/<slug>`; the tenant list
+ * below is a **development-only** index, gated by `tenantIndexEnabled()`.
+ *
+ * In production the root renders the header and nothing else: no tenant name,
+ * no slug, and no query — `getAllTenants()` is not called at all, so the
+ * absence does not depend on the render being tidy. See `tenantIndexEnabled`
+ * for why the gate is a single positive condition.
  */
 export default async function HomePage() {
-  const tenants = await getAllTenants();
+  const tenants = tenantIndexEnabled() ? await getAllTenants() : null;
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-2xl flex-col justify-center px-4 py-16">
@@ -35,6 +48,18 @@ export default async function HomePage() {
         </p>
       </div>
 
+      {tenants !== null && <TenantIndex tenants={tenants} />}
+    </main>
+  );
+}
+
+/**
+ * The development index. Not exported: nothing outside this file should be able
+ * to render a tenant list, and a page module's exports are its route contract.
+ */
+function TenantIndex({ tenants }: { tenants: Tenant[] }) {
+  return (
+    <>
       <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         Tenants
       </p>
@@ -70,6 +95,6 @@ export default async function HomePage() {
           </Card>
         ))}
       </div>
-    </main>
+    </>
   );
 }

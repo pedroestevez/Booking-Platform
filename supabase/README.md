@@ -77,6 +77,59 @@ project's URL/keys in `.env.local` to run (see `.env.example`) — a raw
 Playwright e2e job in CI is unchanged by this: it still targets a real
 Supabase preview project via repository secrets.
 
+## Provisioning a real tenant (ALI-176)
+
+`scripts/provision-tenant.mjs` provisions **one** tenant — its `customers` row,
+its `services`, and its `availability_rules` — from values passed in. It is the
+mechanism ALI-177 P5 fires at production once Pedro confirms P4's content
+inputs; **nothing in ALI-176 runs it against production**.
+
+```bash
+export PROVISION_DATABASE_URL='postgresql://…'   # required; no fallback
+
+# Always dry-run first: does every read and write, then rolls back.
+node scripts/provision-tenant.mjs --dry-run
+
+# The P4 draft, with each value overridable:
+node scripts/provision-tenant.mjs \
+  --slug pedroestevez --name 'Pedro Estevez' \
+  --timezone America/New_York --currency USD \
+  --service 'Interview — 30 min|30|0' \
+  --service 'Intro consultation — 30 min|30|0' \
+  --rule '1-5|10:00|18:00|15'
+
+node scripts/provision-tenant.mjs --help     # full flag list
+node scripts/provision-tenant.mjs --spec tenant.json
+```
+
+Three properties matter more than the flags:
+
+- **It deletes nothing.** `customers` is matched on its unique `slug`,
+  `services` on `(customer_id, name)`, `availability_rules` on
+  `(customer_id, day_of_week, start_time, end_time)`; each match is an update,
+  each miss an insert, and `branding_json` is merged rather than replaced. Rows
+  the spec does not mention are reported and left in place. This is why it is a
+  separate script from `scripts/seed-test-tenant.mjs`, whose convergence is
+  `delete from services` — fine for a throwaway CI database, data loss for a
+  real tenant (and blocked outright by `bookings.service_id`'s
+  `on delete restrict` the moment one booking exists).
+- **It fails closed on the connection.** `PROVISION_DATABASE_URL` and nothing
+  else: no `DATABASE_URL`, no `TEST_DATABASE_URL`, no localhost default. Unset
+  means exit 1 before a socket opens.
+- **It validates before it connects.** Slug shape, IANA timezone, ISO 4217
+  currency, `duration_minutes > 0`, `price_cents >= 0`, `day_of_week` 0–6,
+  `start_time < end_time`, `buffer_minutes >= 0`, and no duplicate convergence
+  keys. The numeric rules mirror migration 0001's CHECK constraints, so an
+  invalid spec is rejected with a named field instead of a driver error — and
+  `src/test/__tests__/provision-tenant.db.test.ts` asserts Postgres rejects the
+  same rows, so the two cannot drift apart silently.
+
+It also sets `app.current_customer_id` as soon as the tenant id is known, so it
+works whether or not the connecting role holds `BYPASSRLS`. A role that reads
+through RLS cannot see an existing tenant, so the run would try to insert one —
+the unique index on `slug` turns that into a loud error naming the cause rather
+than a duplicate.
+
 ## Tenancy & security model
 
 Every row is isolated by `customer_id`. The non-negotiables from `CLAUDE.md`:

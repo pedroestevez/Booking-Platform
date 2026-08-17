@@ -5,7 +5,7 @@ import { CalendarDays, Clock, Tag } from "lucide-react";
 
 import { Separator } from "@/components/ui/separator";
 import type { Service, TenantBranding, TimeSlot } from "@/lib/types";
-import { formatDuration, formatPrice } from "@/lib/utils";
+import { formatDuration, formatServicePrice } from "@/lib/utils";
 
 interface BookingSummaryProps {
   service?: Service;
@@ -56,7 +56,7 @@ export function BookingSummary({ service, slot, branding }: BookingSummaryProps)
           <Tag className="size-4 shrink-0 text-muted-foreground" />
           <dt className="sr-only">Price</dt>
           <dd className="font-medium">
-            {formatPrice(service.priceCents, branding.currency)}
+            {formatServicePrice(service.priceCents, branding.currency)}
           </dd>
         </div>
       </dl>
@@ -66,7 +66,7 @@ export function BookingSummary({ service, slot, branding }: BookingSummaryProps)
       <div className="flex items-baseline justify-between">
         <span className="text-sm text-muted-foreground">Total</span>
         <span className="text-lg font-semibold tabular-nums">
-          {formatPrice(service.priceCents, branding.currency)}
+          {formatServicePrice(service.priceCents, branding.currency)}
         </span>
       </div>
     </div>

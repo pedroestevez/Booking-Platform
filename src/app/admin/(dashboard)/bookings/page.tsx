@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { resolveAdminContext } from "@/lib/admin/auth";
 import { getAdminBookings, type AdminBooking } from "@/lib/admin/bookings";
-import { formatDate, formatPrice, formatTime } from "@/lib/utils";
+import { formatDate, formatServicePrice, formatTime } from "@/lib/utils";
 import type { BookingStatus } from "@/lib/types";
 import { setBookingStatusAction } from "./actions";
 
@@ -101,7 +101,7 @@ function BookingSection({
                       {b.guestEmail}
                     </p>
                     <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                      {b.serviceName} · {formatPrice(b.priceCents, currency)}
+                      {b.serviceName} · {formatServicePrice(b.priceCents, currency)}
                     </p>
                     {b.notes && (
                       <p className="mt-1 line-clamp-2 text-xs italic text-muted-foreground">
