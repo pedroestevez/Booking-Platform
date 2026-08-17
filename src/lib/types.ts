@@ -86,8 +86,40 @@ export interface BlockedSlot {
  * Variable, per-vertical intake captured at booking time (e.g. bags/passengers
  * for transfers, pet breed for grooming). Stored as `bookings.custom_fields`
  * JSONB — data, not schema — so new verticals add fields without migrations.
+ *
+ * One key inside it is **reserved and server-authoritative**: `guest_supplied`
+ * (`GUEST_SUPPLIED_FIELD` in `src/lib/bookings.ts`). See `GuestSupplied`.
  */
 export type CustomFields = Record<string, unknown>;
+
+/**
+ * What a booking request supplied for the guest's `name`/`phone` where it
+ * **differed** from the identity it resolved to (ALI-167).
+ *
+ * Since 0007 an anonymous request can attach a booking to an existing
+ * `end_customers` row but can never alter that row's `name` or `phone`. The
+ * supplied values are not therefore discarded — silently dropping them
+ * reproduces the same failure from the other side, where the owner reads the
+ * dashboard, sees the stored name, and has no trace of what the booker
+ * actually typed. They are per-request facts, so they are recorded on the
+ * per-request row: `bookings.custom_fields.guest_supplied`.
+ *
+ * Written only when the request resolved to a **pre-existing** identity and
+ * supplied a non-empty value that differs from the stored one; first contact
+ * records nothing, because there the stored value *is* the supplied one.
+ *
+ * ## Untrusted display data
+ *
+ * These are unvalidated attacker-controlled strings (ALI-167 R1) — no more
+ * exposure than `custom_fields` already carries, but any admin view that
+ * renders them must treat them as untrusted, and must never substitute them
+ * into the guest-name position. The guest's name is the one stored on the
+ * referenced identity, always.
+ */
+export interface GuestSupplied {
+  name?: string;
+  phone?: string;
+}
 
 /**
  * A guest of a tenant as a reusable identity (maps to `end_customers`). Keyed

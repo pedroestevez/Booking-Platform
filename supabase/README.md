@@ -13,6 +13,7 @@ services + availability and writes bookings through this database (the old
 | `migrations/0003_end_customers_and_custom_fields.sql` | Unified per-tenant `end_customers` identity (bookings reference `end_customer_id`), `bookings.custom_fields` JSONB for per-vertical intake, and the atomic `resolve_or_create_end_customer()` helper. Implements the ALI-38 data-architecture decision. |
 | `migrations/0004_tenant_members.sql` | Maps a signed-in admin (Clerk `auth_subject`) to the tenant(s) they manage. |
 | `migrations/0005_stripe_connect.sql` | Per-tenant Stripe Connect (Express) account columns on `customers`. |
+| `migrations/0007_guest_identity_no_overwrite.sql` | Makes an existing `end_customers` row immutable to the anonymous booking path: `resolve_or_create_end_customer()` now resolves-or-creates and never updates, so a second booker who types a known email can no longer overwrite that guest's stored `name`/`phone` (which, because bookings reference `end_customer_id`, rewrote the guest name on their past bookings too). What the request supplied is recorded on the booking instead, under the reserved server-authoritative `custom_fields.guest_supplied` key. Closes ALI-167. |
 | `seed.sql` | Two demo tenants + their services/availability, for local dev and demos. |
 
 ## Applying
