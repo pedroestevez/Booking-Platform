@@ -57,6 +57,40 @@ export async function getTenantById(customerId: string): Promise<Tenant | null> 
   return data ? mapTenant(data) : null;
 }
 
+/**
+ * The IANA timezone a tenant operates in, resolved **server-side** from a
+ * `customer_id` (ALI-117 criterion 7).
+ *
+ * Exists as its own read rather than as a `branding.timezone` lookup at the
+ * call site because of where the value ends up: `createBooking` runs on the
+ * RLS-bypassing service-role client, so every input it uses to decide *which
+ * times exist* has to originate here, from the tenant's own row, and never from
+ * a request payload. That is ALI-139's lesson applied to a second
+ * browser-reachable value — a guest who could supply the zone could shift the
+ * whole availability window and book a time the business never offered.
+ *
+ * Scoped by `customer_id` in app code (the mandated defense-in-depth filter)
+ * even though it is the primary key, matching every other read in this file.
+ *
+ * Throws when the tenant does not exist: the caller is about to decide whether
+ * a slot is real, and there is no safe guess. The `?? "UTC"` inside `mapTenant`
+ * for a tenant whose `branding_json` omits `timezone` is a separate, narrower
+ * gap tracked in ALI-184 — deliberately not papered over here, where papering
+ * would hide it.
+ */
+export async function getTenantTimeZone(customerId: string): Promise<string> {
+  const supabase = createServiceRoleClient();
+  const { data, error } = await supabase
+    .from("customers")
+    .select("id, name, slug, branding_json")
+    .eq("id", customerId)
+    .maybeSingle<CustomerRow>();
+
+  if (error) throw error;
+  if (!data) throw new Error("This booking page is no longer available.");
+  return mapTenant(data).branding.timezone;
+}
+
 export async function getActiveServices(customerId: string): Promise<Service[]> {
   const supabase = createServiceRoleClient();
   const { data, error } = await supabase

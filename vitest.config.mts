@@ -6,11 +6,20 @@ import { defineConfig } from "vitest/config";
  * Unit + integration tests (Vitest). End-to-end tests run under Playwright
  * (`playwright.config.ts`) and are excluded here so `npm test` stays fast.
  *
- * NOTE ON TIMEZONE: the npm script pins `TZ=UTC`. `generateDaySlots` currently
- * resolves rule times against the *runtime* timezone (see the NOTE in
- * `src/lib/availability.ts`), so without pinning, results would differ by
- * machine. The pin makes the suite deterministic; it does not fix the
- * underlying tenant-timezone gap, which is tracked separately.
+ * NOTE ON TIMEZONE (ALI-117): the npm script still pins `TZ=UTC`, but the pin no
+ * longer carries any correctness weight and must never be mistaken for coverage
+ * of the tenant-timezone question. `generateDaySlots` now takes a **required**
+ * `timeZone` and derives every weekday and wall-clock boundary from it, so its
+ * output does not depend on the process zone at all. The pin survives only to
+ * keep incidental `new Date()`/`toLocaleString` formatting in *other* suites
+ * stable across machines.
+ *
+ * What actually proves zone-independence is running the availability suite
+ * under a *hostile* process zone: `npm run test:tz` executes it under
+ * `TZ=Pacific/Kiritimati` (UTC+14 — neither UTC nor any tenant zone in the
+ * fixtures), and `npm test` chains it so CI cannot get the pinned half without
+ * the unpinned one. A green suite under `TZ=UTC` alone is exactly the evidence
+ * that cannot distinguish a fixed engine from a broken one.
  *
  * NOTE ON `server-only` (ALI-98): that package's `exports` map resolves to a
  * module which throws by design outside a `react-server` condition, so any

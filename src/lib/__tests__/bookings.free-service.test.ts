@@ -38,6 +38,11 @@ vi.mock("@/lib/tenants", () => ({
   getAvailabilityRules: vi.fn(async () => []),
   getBlockedSlots: vi.fn(async () => []),
   getUpcomingBookings: vi.fn(async () => []),
+  // ALI-117: `createBooking` now resolves the tenant's zone server-side before
+  // it re-checks availability. Stubbed to the fixture's own zone; this suite is
+  // about the status on the inserted row, and `generateDaySlots` is mocked below
+  // so the value is never actually used for arithmetic here.
+  getTenantTimeZone: vi.fn(async () => "UTC"),
 }));
 
 vi.mock("@/lib/availability", () => ({
