@@ -1,6 +1,7 @@
 "use server";
 
 import { createBooking } from "@/lib/bookings";
+import { toGuestFacingMessage } from "@/lib/errors";
 import { getTenantBySlug } from "@/lib/tenants";
 import type { CreateBookingRequest } from "@/lib/types";
 
@@ -39,7 +40,7 @@ const UNKNOWN_TENANT_MESSAGE = "This booking page is no longer available.";
  * bookings are refused. This satisfies the CLAUDE.md non-negotiable that tenant
  * identity comes from server-side context, never a browser-supplied value.
  *
- * ## Two rules this function must keep
+ * ## Three rules this function must keep
  *
  * 1. **Never spread the request into `createBooking`.** The fields are copied
  *    across one at a time, on purpose. `...request` would carry any extra
@@ -49,6 +50,15 @@ const UNKNOWN_TENANT_MESSAGE = "This booking page is no longer available.";
  *    literals the compiler can see; it does nothing to a JSON payload.
  * 2. **Resolution must fail closed.** No tenant, no booking. There is no
  *    fallback to a supplied id, because a fallback is the hole reopened.
+ * 3. **Never return a message the code did not write for a guest** (ALI-140).
+ *    A trust boundary runs both ways: what comes in is untrusted, and what goes
+ *    out is a disclosure. This `catch` used to answer with `err.message`, which
+ *    handed an anonymous visitor constraint names, RLS denials naming tables,
+ *    the env-var names behind a misconfiguration, and — via a migration's own
+ *    `raise exception` — an interpolated tenant UUID. `toGuestFacingMessage`
+ *    inverts it: only a message on the `GUEST_FACING_MESSAGES` allowlist
+ *    reaches the guest, and everything else is logged server-side once, with a
+ *    correlation id the guest can quote.
  */
 export async function createBookingAction(
   request: CreateBookingRequest,
@@ -81,10 +91,9 @@ export async function createBookingAction(
     });
     return { ok: true, bookingId: booking.id };
   } catch (err) {
-    const error =
-      err instanceof Error
-        ? err.message
-        : "Something went wrong creating your booking.";
-    return { ok: false, error };
+    // Rule 3. The mapping is an allowlist — a message written for a guest passes,
+    // anything else becomes the generic message plus one log record — so the
+    // failure mode of a future `throw` on this path is terse copy, not a leak.
+    return { ok: false, error: toGuestFacingMessage(err, "createBookingAction") };
   }
 }
