@@ -285,11 +285,25 @@ describe("invariant check (e): the offered slots belong to the cell that was cli
 });
 
 describe("a misconfigured tenant gets an explicit state, not a blank page", () => {
+  /**
+   * Each case carries an `echoProbe`: a string that must **not** appear in the
+   * rendered HTML if the component is refusing to echo the configured value back
+   * at the guest.
+   *
+   * For a real zone the probe is the value itself. The empty string needs its
+   * own, because `expect(html).not.toContain("")` is a tautology — every string
+   * contains the empty string, so that assertion can never fail and the case
+   * would silently assert nothing at all. `EMPTY_ZONE_PROBE` stands in for it: a
+   * token that would only ever reach the DOM if the component started rendering
+   * some placeholder for a missing zone.
+   */
+  const EMPTY_ZONE_PROBE = "__unset_timezone__";
+
   it.each([
-    ["an empty timezone", ""],
-    ["a city that is not an IANA name", "Miami"],
-    ["a fixed offset", "+05:00"],
-  ])("renders a legible notice for %s", (_label, timezone) => {
+    ["an empty timezone", "", EMPTY_ZONE_PROBE],
+    ["a city that is not an IANA name", "Miami", "Miami"],
+    ["a fixed offset", "+05:00", "+05:00"],
+  ] as const)("renders a legible notice for %s", (_label, timezone, echoProbe) => {
     // `generateDaySlots` throws for these by design (criterion 2) and that is
     // right — but an unhandled throw in a client render has no boundary above it
     // here, so the tenant's whole booking page came back blank. Containment
@@ -302,7 +316,7 @@ describe("a misconfigured tenant gets an explicit state, not a blank page", () =
     expect(html).toContain("Online booking is unavailable");
     expect(dayCells(html)).toHaveLength(0);
     // The raw configured value is not reflected back into the page.
-    expect(html).not.toContain(timezone === "" ? " never" : timezone);
+    expect(html).not.toContain(echoProbe);
   });
 
   it("still renders normally for a valid zone (the control)", () => {

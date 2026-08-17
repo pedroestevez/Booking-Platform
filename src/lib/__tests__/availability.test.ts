@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   assertIanaTimeZone,
   availableWeekdays,
+  civilDateInTimeZone,
   generateDaySlots,
+  instantForCivilDate,
   InvalidTimeZoneError,
   weekdayInTimeZone,
+  type CivilDate,
 } from "@/lib/availability";
 import type {
   AvailabilityRule,
@@ -999,6 +1002,60 @@ describe("AC7: no ghost slots — the grid and the write path agree", () => {
 
       expect(gridSaysBookable).toBe(engineOffers);
     }
+  });
+});
+
+describe("instantForCivilDate lands on the day it was asked for", () => {
+  /**
+   * The contract, pinned over the zones that make it hard (ALI-117 N4).
+   *
+   * These five are the complete set — measured over all 418 zones
+   * `Intl.supportedValuesOf("timeZone")` reports, across every date in 2026 — for
+   * which **local midnight does not exist** on some date, because they shift at
+   * midnight itself. No zone lacks a local noon.
+   *
+   * This does *not* pin the midday anchor, and is deliberately not written to:
+   * the fallback scan rescues a midnight anchor too, so changing `12 * 60` to `0`
+   * leaves this green. That is recorded honestly rather than papered over with an
+   * assertion that would only look discriminating. What it does pin is the thing
+   * a caller actually relies on — that the instant comes back on the requested
+   * calendar date — which fails the moment the anchor moves to a nonexistent time
+   * *and* the fallback stops covering for it.
+   */
+  const MIDNIGHT_SKIPPING_ZONES: [string, CivilDate][] = [
+    ["Africa/Cairo", { year: 2026, month: 4, day: 24 }],
+    ["America/Havana", { year: 2026, month: 3, day: 8 }],
+    ["America/Santiago", { year: 2026, month: 9, day: 6 }],
+    ["Asia/Beirut", { year: 2026, month: 3, day: 29 }],
+    ["Atlantic/Azores", { year: 2026, month: 3, day: 29 }],
+  ];
+
+  it.each(MIDNIGHT_SKIPPING_ZONES)(
+    "%s has no local midnight on its transition date, and still resolves",
+    (zone, date) => {
+      const instant = instantForCivilDate(date, zone);
+      expect(civilDateInTimeZone(instant, zone)).toEqual(date);
+    },
+  );
+
+  it("round-trips ordinary dates in ordinary zones too", () => {
+    for (const zone of [NEW_YORK, AUCKLAND, "UTC", "Asia/Kathmandu"]) {
+      for (const date of [
+        { year: 2026, month: 1, day: 1 },
+        { year: 2026, month: 3, day: 8 },
+        { year: 2026, month: 8, day: 17 },
+        { year: 2026, month: 11, day: 1 },
+        { year: 2026, month: 12, day: 31 },
+      ]) {
+        expect(civilDateInTimeZone(instantForCivilDate(date, zone), zone)).toEqual(date);
+      }
+    }
+  });
+
+  it("refuses an unusable zone rather than guessing a day", () => {
+    expect(() =>
+      instantForCivilDate({ year: 2026, month: 8, day: 17 }, "Miami"),
+    ).toThrow(InvalidTimeZoneError);
   });
 });
 

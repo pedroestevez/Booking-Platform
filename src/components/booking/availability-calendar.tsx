@@ -62,6 +62,32 @@ function carrier(date: CivilDate): Date {
 }
 
 /**
+ * The accessible label on a slot button, e.g. `"Monday, September 7 at 9:00 AM"`.
+ *
+ * The visible text is the time alone, because the date is already the heading
+ * above the list. The accessible name carries **both**, in the tenant's zone,
+ * for two reasons:
+ *
+ *   1. A screen-reader user tabbing into the list hears only "9:00 AM" otherwise,
+ *      with the date announced somewhere they may never have been.
+ *   2. It makes invariant check (e) observable in the product rather than only
+ *      in a test: the day this slot actually falls on, on the business's clock,
+ *      is now rendered next to the day the guest clicked. If the two ever
+ *      disagree the page says so out loud, instead of the disagreement living
+ *      invisibly between a cell and an ISO string.
+ */
+function formatSlotLabel(iso: string, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(iso));
+}
+
+/**
  * The accessible label a day cell carries, e.g. `"Monday, August 17"`.
  *
  * Exported so the calendar's tests read the *rendered* label through the same
@@ -321,6 +347,7 @@ export function AvailabilityCalendar({
                       type="button"
                       role="option"
                       aria-selected={!!active}
+                      aria-label={formatSlotLabel(slot.start, timeZone)}
                       onClick={() => onSelectSlot(slot)}
                       className={cn(
                         "rounded-lg border px-3 py-2.5 text-sm font-medium tabular-nums transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",

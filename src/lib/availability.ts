@@ -288,12 +288,34 @@ export function sameCivilDate(a: CivilDate, b: CivilDate): boolean {
  * An instant that falls on `date` in `timeZone` — the reference point to hand
  * `generateDaySlots` for a given calendar day.
  *
- * **Midday local, deliberately not midnight.** Some zones have no `00:00` on
- * their spring-forward date — `America/Santiago`, `America/Havana` and
- * `Asia/Beirut` among them shift at midnight itself — so midnight is a
- * reference point that does not always exist, and a calendar built on it would
- * lose exactly one day a year in those zones. Midday always exists: no zone has
- * ever shifted by twelve hours.
+ * ## The anchor, stated as measured rather than as assumed
+ *
+ * An earlier version of this comment claimed a midnight anchor "would lose
+ * exactly one day a year" in the zones that shift at midnight. That was wrong,
+ * and worth correcting precisely, because the fallback below already rescues it.
+ *
+ * Measured over all 418 zones `Intl.supportedValuesOf("timeZone")` reports,
+ * across every date in 2026:
+ *
+ *   • **5 zones have no local `00:00` on one date** — `Africa/Cairo` (Apr 24),
+ *     `America/Havana` (Mar 8), `America/Santiago` (Sep 6), `Asia/Beirut` and
+ *     `Atlantic/Azores` (both Mar 29). They shift *at* midnight.
+ *   • **0 zones lack a local `12:00`** on any date.
+ *
+ * So the honest account is: the **fallback scan is what guarantees correctness**,
+ * and it rescues either anchor — with it, a midnight anchor also returns an
+ * instant on the right day in all five of those zones. Midday is belt-and-braces
+ * on top of that, chosen because it is the one hour no zone has ever skipped, so
+ * the common path never depends on the fallback at all.
+ *
+ * The anchor is therefore **not load-bearing and not pinned by a test**: changing
+ * `12 * 60` to `0` leaves the suite green, which is the truth and is recorded as
+ * such rather than dressed up with a decorative assertion. What *is* pinned is
+ * this function's contract — that the returned instant lands on `date` in
+ * `timeZone` — asserted in `availability.test.ts` over exactly those five hostile
+ * zones. That test goes red if the anchor moves to a time that does not exist
+ * *and* the fallback is removed, which is the combination that would actually be
+ * wrong.
  */
 export function instantForCivilDate(date: CivilDate, timeZone: string): Date {
   const midday = instantForWallClock(timeZone, date, 12 * 60);
