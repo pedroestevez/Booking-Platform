@@ -14,12 +14,14 @@ import { defineConfig } from "vitest/config";
  * keep incidental `new Date()`/`toLocaleString` formatting in *other* suites
  * stable across machines.
  *
- * What actually proves zone-independence is running the availability suite
- * under a *hostile* process zone: `npm run test:tz` executes it under
- * `TZ=Pacific/Kiritimati` (UTC+14 — neither UTC nor any tenant zone in the
- * fixtures), and `npm test` chains it so CI cannot get the pinned half without
- * the unpinned one. A green suite under `TZ=UTC` alone is exactly the evidence
- * that cannot distinguish a fixed engine from a broken one.
+ * What actually proves zone-independence is running the availability suites
+ * under *hostile* process zones: `npm run test:tz` executes them under
+ * `Pacific/Kiritimati` (UTC+14), `Europe/London` (east of the fixtures' tenant —
+ * the direction of the B1 wrong-day defect) and `America/New_York` (the one zone
+ * the B1 defect got right, so it can never be the only one checked). `npm test`
+ * chains all three, so CI cannot get the pinned half without the unpinned ones.
+ * A green suite under `TZ=UTC` alone is exactly the evidence that cannot
+ * distinguish a fixed engine from a broken one.
  *
  * NOTE ON `server-only` (ALI-98): that package's `exports` map resolves to a
  * module which throws by design outside a `react-server` condition, so any
