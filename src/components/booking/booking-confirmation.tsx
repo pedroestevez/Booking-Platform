@@ -1,7 +1,7 @@
 "use client";
 
 import { format } from "date-fns";
-import { CalendarPlus, Check } from "lucide-react";
+import { CalendarPlus, Check, Info, Mail } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -16,6 +16,15 @@ interface BookingConfirmationProps {
   guest: GuestDetails;
   /** The created booking id, used as the calendar invite UID. */
   bookingId?: string;
+  /**
+   * Whether this deployment can actually send the guest a confirmation email.
+   *
+   * Required, never defaulted: a caller that forgets to state it would
+   * otherwise inherit a screen implying somebody was notified when nobody was.
+   * The booking commits either way (ALI-69 AC6) — this decides only whether
+   * the screen is allowed to imply a message went out.
+   */
+  notificationsEnabled: boolean;
   onBookAnother: () => void;
 }
 
@@ -25,9 +34,21 @@ export function BookingConfirmation({
   slot,
   guest,
   bookingId,
+  notificationsEnabled,
   onBookAnother,
 }: BookingConfirmationProps) {
   const start = new Date(slot.start);
+
+  // The fallback contact path, offered when no automated message could be
+  // sent. It is whatever *this tenant* configured — the shared component never
+  // carries an address of its own, so a tenant that sets none gets no button
+  // rather than somebody else's inbox.
+  const contactEmail = tenant.branding.contactEmail;
+  const contactMailto = contactEmail
+    ? `mailto:${contactEmail}?subject=${encodeURIComponent(
+        `Booking — ${service.name} on ${format(start, "EEEE, MMMM d")}`,
+      )}`
+    : undefined;
 
   function handleAddToCalendar() {
     const descriptionParts = [`Booked for ${guest.name} (${guest.email}).`];
@@ -105,9 +126,39 @@ export function BookingConfirmation({
         <CalendarPlus className="size-4" />
         Add to calendar
       </Button>
-      <p className="mt-2 text-xs text-muted-foreground">
-        Online payment arrives in an upcoming release.
-      </p>
+      {notificationsEnabled ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Online payment arrives in an upcoming release.
+        </p>
+      ) : (
+        <div className="mt-4 rounded-xl border border-dashed bg-muted/30 p-4 text-left">
+          <p className="flex items-center gap-2 text-sm font-medium">
+            <Info aria-hidden="true" className="size-4 shrink-0" />
+            No email was sent. Nobody was notified.
+          </p>
+          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+            The booking itself is real — it&apos;s saved, and the time is held.
+            The notification step just isn&apos;t wired up on this deployment
+            yet; it&apos;s a work in progress, being built in the open. Glad
+            you&apos;re curious how it works. Use{" "}
+            <span className="font-medium text-foreground/80">
+              Add to calendar
+            </span>{" "}
+            above so the time doesn&apos;t get away from you.
+          </p>
+          {contactMailto ? (
+            <Button asChild variant="secondary" className="mt-3 w-full">
+              <a href={contactMailto}>
+                <Mail className="size-4" />
+                Email {tenant.name} directly
+              </a>
+            </Button>
+          ) : null}
+          <p className="mt-3 text-xs text-muted-foreground">
+            Online payment also arrives in an upcoming release.
+          </p>
+        </div>
+      )}
 
       <Button variant="ghost" onClick={onBookAnother} className="mt-5">
         Book another appointment

@@ -87,6 +87,7 @@ export function mapTenant(row: CustomerRow): Tenant {
       tagline: b.tagline,
       currency: b.currency ?? "USD",
       timezone: b.timezone ?? "UTC",
+      contactEmail: b.contactEmail,
     },
   };
 }

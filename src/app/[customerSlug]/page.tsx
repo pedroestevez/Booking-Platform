@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 
 import { BookingFlow } from "@/components/booking/booking-flow";
 import { TenantTheme } from "@/components/booking/tenant-theme";
+import { isEmailConfigured } from "@/lib/email/provider";
 import {
   getActiveServices,
   getAvailabilityRules,
@@ -80,6 +81,7 @@ export default async function TenantBookingPage({ params }: PageProps) {
             rules={rules}
             blocked={blocked}
             bookings={bookings}
+            notificationsEnabled={isEmailConfigured()}
           />
         </main>
 
