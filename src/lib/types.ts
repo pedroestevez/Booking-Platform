@@ -19,6 +19,15 @@ export interface TenantBranding {
   currency: string;
   /** IANA timezone the business operates in, e.g. "America/New_York". */
   timezone: string;
+  /**
+   * Where a guest can reach this business directly, as a plain address.
+   *
+   * Optional on purpose: it is the fallback contact path the product offers
+   * when an automated notification could not be sent (see
+   * `BookingConfirmation`). A tenant that sets nothing simply gets no contact
+   * button — never a hard-coded one.
+   */
+  contactEmail?: string;
 }
 
 /** A bookable business (maps to `customers`). */

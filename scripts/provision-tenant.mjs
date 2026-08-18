@@ -132,6 +132,10 @@ const DRAFT_SPEC = {
     brandColor: "oklch(0.55 0.16 250)",
     currency: "USD",
     timezone: "America/New_York",
+    // Where a guest is pointed when no confirmation email could be sent
+    // (ALI-205). Without it the confirmation screen still says plainly that
+    // nobody was notified, but offers no way to fix that.
+    contactEmail: "pedroestevez001@gmail.com",
   },
   services: [
     {
@@ -177,6 +181,9 @@ Options:
   --brand-color <css>      branding_json.brandColor
   --tagline <text>         branding_json.tagline
   --logo-url <url>         branding_json.logoUrl
+  --contact-email <addr>   branding_json.contactEmail — the fallback contact
+                           offered on the confirmation screen when no
+                           notification email could be sent
   --service '<name>|<minutes>|<price_cents>[|<description>]'
                            Repeatable. Any --service replaces the whole list.
   --rule '<days>|<start>|<end>|<buffer>'
@@ -260,6 +267,10 @@ function parseArgs(argv) {
         break;
       case "--logo-url":
         flags.logoUrl = valueOf(i, arg);
+        i += 1;
+        break;
+      case "--contact-email":
+        flags.contactEmail = valueOf(i, arg);
         i += 1;
         break;
       case "--service":
@@ -396,6 +407,7 @@ async function buildSpec(flags) {
     brandColor: flags.brandColor,
     tagline: flags.tagline,
     logoUrl: flags.logoUrl,
+    contactEmail: flags.contactEmail,
   };
   for (const [key, value] of Object.entries(brandingFlags)) {
     if (value !== undefined) {

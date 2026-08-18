@@ -56,6 +56,13 @@ interface BookingFlowProps {
   blocked: BlockedSlot[];
   /** Existing bookings, used only to filter taken slots (none in v0.1). */
   bookings?: Booking[];
+  /**
+   * Whether this deployment can send the guest a confirmation email. Computed
+   * on the server from the email provider's own configuration and passed down,
+   * because a client component cannot read `process.env` at all — and guessing
+   * would mean the confirmation screen asserting a send it cannot observe.
+   */
+  notificationsEnabled: boolean;
 }
 
 export function BookingFlow({
@@ -64,6 +71,7 @@ export function BookingFlow({
   rules,
   blocked,
   bookings = [],
+  notificationsEnabled,
 }: BookingFlowProps) {
   const [step, setStep] = useState<BookingStepKey>("service");
   const [service, setService] = useState<Service>();
@@ -187,6 +195,7 @@ export function BookingFlow({
                 slot={slot}
                 guest={guest}
                 bookingId={bookingId}
+                notificationsEnabled={notificationsEnabled}
                 onBookAnother={reset}
               />
             )}
