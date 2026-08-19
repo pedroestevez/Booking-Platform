@@ -1,5 +1,7 @@
 import "server-only";
 
+import { cache } from "react";
+
 import { createServiceRoleClient } from "@/lib/supabase/server";
 import {
   mapAvailabilityRule,
@@ -36,7 +38,7 @@ export async function getTenantBySlug(slug: string): Promise<Tenant | null> {
   const supabase = createServiceRoleClient();
   const { data, error } = await supabase
     .from("customers")
-    .select("id, name, slug, branding_json")
+    .select("id, name, slug, branding_json, custom_domain")
     .eq("slug", slug)
     .maybeSingle<CustomerRow>();
 
@@ -44,12 +46,42 @@ export async function getTenantBySlug(slug: string): Promise<Tenant | null> {
   return data ? mapTenant(data) : null;
 }
 
+/**
+ * Resolve a tenant by the HTTP host it is addressed at directly (ALI-211),
+ * e.g. `booking.pedroestevez.com` — no `/<slug>` prefix. Same shape as
+ * `getTenantBySlug`: service-role client (the tenant isn't known yet, so
+ * there's no `customer_id` to satisfy an RLS predicate with), `mapTenant`.
+ *
+ * Callers must pass an already-normalized host (see
+ * `resolveRequestHost`/`isPlatformSharedHost` in `@/lib/request-host`) — this
+ * function does no normalization of its own, matching the column's own
+ * lowercase-enforced form (migration 0008).
+ *
+ * Wrapped in React's `cache()` so `generateMetadata` and the page body — which
+ * both need this for the same request — share one query instead of issuing it
+ * twice. Per-request only: `cache()` memoizes for the lifetime of one render,
+ * never across requests.
+ */
+export const getTenantByHost = cache(async function getTenantByHost(
+  host: string,
+): Promise<Tenant | null> {
+  const supabase = createServiceRoleClient();
+  const { data, error } = await supabase
+    .from("customers")
+    .select("id, name, slug, branding_json, custom_domain")
+    .eq("custom_domain", host)
+    .maybeSingle<CustomerRow>();
+
+  if (error) throw error;
+  return data ? mapTenant(data) : null;
+});
+
 /** Resolve a tenant by its id (used by the admin layer after a membership lookup). */
 export async function getTenantById(customerId: string): Promise<Tenant | null> {
   const supabase = createServiceRoleClient();
   const { data, error } = await supabase
     .from("customers")
-    .select("id, name, slug, branding_json")
+    .select("id, name, slug, branding_json, custom_domain")
     .eq("id", customerId)
     .maybeSingle<CustomerRow>();
 
@@ -82,7 +114,7 @@ export async function getTenantTimeZone(customerId: string): Promise<string> {
   const supabase = createServiceRoleClient();
   const { data, error } = await supabase
     .from("customers")
-    .select("id, name, slug, branding_json")
+    .select("id, name, slug, branding_json, custom_domain")
     .eq("id", customerId)
     .maybeSingle<CustomerRow>();
 
@@ -186,7 +218,7 @@ export async function getAllTenants(): Promise<Tenant[]> {
   const supabase = createServiceRoleClient();
   const { data, error } = await supabase
     .from("customers")
-    .select("id, name, slug, branding_json")
+    .select("id, name, slug, branding_json, custom_domain")
     .order("name", { ascending: true })
     .returns<CustomerRow[]>();
 

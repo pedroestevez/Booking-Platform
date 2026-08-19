@@ -24,6 +24,7 @@ export interface CustomerRow {
   name: string;
   slug: string;
   branding_json: Record<string, unknown>;
+  custom_domain: string | null;
 }
 
 export interface ServiceRow {
@@ -89,6 +90,10 @@ export function mapTenant(row: CustomerRow): Tenant {
       timezone: b.timezone ?? "UTC",
       contactEmail: b.contactEmail,
     },
+    // A `customers` column, not tenant-controlled config (unlike
+    // `branding_json`) — set only by provisioning until ALI-212 (domain
+    // ownership verification) adds an admin-facing write path.
+    customDomain: row.custom_domain ?? undefined,
   };
 }
 

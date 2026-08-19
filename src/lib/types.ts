@@ -36,6 +36,17 @@ export interface Tenant {
   name: string;
   slug: string;
   branding: TenantBranding;
+  /**
+   * The host (e.g. `booking.pedroestevez.com`) this tenant is addressed at
+   * directly, without a `/<slug>` prefix (maps to `customers.custom_domain`,
+   * ALI-211). A `customers` column, not tenant-controlled config — deliberately
+   * **not** nested inside `branding`, unlike `logoUrl`/`tagline`/etc., because a
+   * tenant does not get to set which host routes to it; only provisioning
+   * (and, later, ALI-212's ownership-verified admin path) does.
+   *
+   * Undefined for the common case — a tenant addressed only by slug.
+   */
+  customDomain?: string;
 }
 
 /** A business-owner's role within a tenant (maps to `tenant_members.role`). */

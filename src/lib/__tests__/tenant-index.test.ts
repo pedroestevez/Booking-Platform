@@ -1,3 +1,4 @@
+import { headers } from "next/headers";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -29,6 +30,23 @@ import type { Tenant } from "@/lib/types";
 
 vi.mock("@/lib/tenants", () => ({
   getAllTenants: vi.fn(),
+  // ALI-211: `/` now also resolves a tenant by request host. These tests are
+  // about the ALI-176 tenant-enumeration gate, not host resolution, so every
+  // render below uses `booking.aligncompass.com` — a platform-shared host
+  // (`isPlatformSharedHost`) — which must short-circuit BEFORE this is ever
+  // called. Left unmocked-to-resolve (never given a return value) so a
+  // regression that removed that short-circuit fails loudly instead of this
+  // mock quietly supplying a tenant.
+  getTenantByHost: vi.fn(),
+}));
+
+// `src/app/page.tsx` now resolves the request host via `resolveRequestHost`
+// (`@/lib/request-host`), which calls `next/headers`' `headers()` — a Next.js
+// API that throws outside a real request scope (exactly the "call the route
+// handler directly" pattern this file uses). Mocked so `HomePage()` can be
+// invoked directly, the same way `getAllTenants` already is.
+vi.mock("next/headers", () => ({
+  headers: vi.fn(),
 }));
 
 const LEAKY_TENANT: Tenant = {
@@ -42,10 +60,26 @@ const LEAKY_TENANT: Tenant = {
   },
 };
 
-/** Render `/` the way a request does, and return the response body. */
-async function renderRoot(nodeEnv: string): Promise<string> {
+/**
+ * Render `/` the way a request does, and return the response body.
+ *
+ * `host` defaults to the platform's own shared host (ALI-211) — the value
+ * every existing test in this file exercises, and the one under which
+ * `getTenantByHost` must never be called (see the mock above). It is a
+ * parameter, not a constant, only so a future test in this file can assert
+ * the platform-shared-host short-circuit explicitly if it needs to; the
+ * dedicated custom-domain routing tests live in
+ * `src/app/__tests__/root-custom-domain.test.tsx`.
+ */
+async function renderRoot(
+  nodeEnv: string,
+  host = "booking.aligncompass.com",
+): Promise<string> {
   vi.stubEnv("NODE_ENV", nodeEnv);
   vi.mocked(getAllTenants).mockResolvedValue([LEAKY_TENANT]);
+  vi.mocked(headers).mockResolvedValue(
+    new Headers({ host }) as unknown as Awaited<ReturnType<typeof headers>>,
+  );
   // Imported inside the helper so the stubbed env is in place first — the page
   // reads it per render, but importing late also keeps module init honest.
   const { default: HomePage } = await import("@/app/page");
