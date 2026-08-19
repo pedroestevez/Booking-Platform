@@ -34,11 +34,22 @@ function adminNotConfigured(): NextResponse {
  */
 const CUSTOM_DOMAIN_HEADER = "x-booking-custom-domain";
 
-/** Lowercased request host, preferring the proxy-forwarded value. */
+/**
+ * Lowercased, port-stripped request host, preferring the proxy-forwarded
+ * value. `getTenantByHost` documents this normalization as the caller's job
+ * (see `src/lib/tenants.ts`) — done once, here, so every call site downstream
+ * (both `isPlatformHost` and `getTenantByHost`) sees the same normalized
+ * value. `isPlatformHost` also strips a port internally, so this is not load
+ * bearing for it, but `getTenantByHost` does a zero-normalization exact
+ * match: without stripping here, a `Host` that legitimately carries a
+ * non-default port (a proxy, a local/test setup) would never match a stored
+ * `custom_domain` and would 404 a real tenant instead of resolving them.
+ */
 function requestHost(req: NextRequest): string {
-  return (
+  const raw = (
     req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? ""
   ).toLowerCase();
+  return raw.split(":")[0] ?? "";
 }
 
 /**
@@ -107,10 +118,26 @@ function handleAdmin(req: NextRequest, event: NextFetchEvent) {
  *     any tenant's data, wrong or arbitrary.
  *   - **lookup throws** → a 503, not a 404 and not a silent fallback — a
  *     lookup failure is not the same fact as "no such tenant".
+ *
+ * On the platform host, `CUSTOM_DOMAIN_HEADER` is explicitly stripped from
+ * whatever the client sent, rather than left alone. Without this, a client
+ * could set `x-booking-custom-domain: 1` directly on a platform-host request
+ * and the tenant page would read it as if middleware had set it — hiding the
+ * "Powered by" footer and swapping the metadata title for a tenant who never
+ * bought white-labeling. Not a data-isolation break (the page content is
+ * still that tenant's own `/<slug>` route either way), but the header must be
+ * entirely middleware-controlled, not client-suppliable in either direction:
+ * a real custom-domain visitor can't suppress it (the rewrite branch below
+ * always `.set()`s it, overwriting any client value) and a platform-host
+ * visitor can't forge it.
  */
 async function handlePublic(req: NextRequest): Promise<NextResponse> {
   const host = requestHost(req);
-  if (isPlatformHost(host)) return NextResponse.next();
+  if (isPlatformHost(host)) {
+    const headers = new Headers(req.headers);
+    headers.delete(CUSTOM_DOMAIN_HEADER);
+    return NextResponse.next({ request: { headers } });
+  }
 
   let tenant;
   try {

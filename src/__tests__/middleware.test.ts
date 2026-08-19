@@ -219,4 +219,52 @@ describe("public-route host resolution", () => {
     expect(res?.status).toBe(503);
     expect(res?.headers.get("x-middleware-rewrite")).toBeNull();
   });
+
+  it("strips a client-forged x-booking-custom-domain header on the platform host", async () => {
+    // A client sending this header directly at the platform host must not be
+    // able to trick the tenant page into hiding its "Powered by" footer or
+    // skipping the metadata title template — the header is middleware-owned,
+    // not client-suppliable, in either direction.
+    const spoofed = new NextRequest(
+      new URL("/acme-spa", "https://booking-platform.vercel.app"),
+      {
+        headers: {
+          host: "booking-platform.vercel.app",
+          "x-booking-custom-domain": "1",
+        },
+      },
+    );
+
+    const res = await middleware(spoofed, event);
+
+    expect(res?.headers.get("x-middleware-next")).toBe("1");
+    expect(res?.headers.get("x-middleware-rewrite")).toBeNull();
+    // Not merely absent from the plain response headers (it never would be —
+    // this mechanism carries values via x-middleware-request-<name>, not
+    // ordinary response headers) but absent from the override list the real
+    // Next.js server reads to decide which headers to forward, and absent as
+    // a forwarded value in its own right.
+    const overridden = (res?.headers.get("x-middleware-override-headers") ?? "")
+      .split(",")
+      .map((s) => s.trim());
+    expect(overridden).not.toContain("x-booking-custom-domain");
+    expect(
+      res?.headers.get("x-middleware-request-x-booking-custom-domain"),
+    ).toBeNull();
+    expect(getTenantByHost).not.toHaveBeenCalled();
+  });
+
+  it("resolves a custom domain whose Host header carries a non-default port", async () => {
+    // getTenantByHost documents zero normalization of its own — the caller
+    // (middleware) owns lowercasing AND stripping a trailing :port. A real
+    // proxy or local/test setup can legitimately send one.
+    vi.mocked(getTenantByHost).mockResolvedValue(TENANT);
+
+    const res = await middleware(req("/", "Booking.Acme-Spa.com:8443"), event);
+
+    expect(getTenantByHost).toHaveBeenCalledWith("booking.acme-spa.com");
+    expect(res?.headers.get("x-middleware-rewrite")).toBe(
+      "https://booking.acme-spa.com:8443/acme-spa",
+    );
+  });
 });
