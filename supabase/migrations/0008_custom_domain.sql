@@ -15,9 +15,10 @@
 -- `x-forwarded-host` header (`src/lib/request-host.ts`,
 -- `getTenantByHost` in `src/lib/tenants.ts`) to decide WHICH TENANT'S DATA a
 -- request at `/` sees — services, availability, upcoming bookings, branding.
--- Get either of the two properties below wrong and a value in this column
--- becomes a way to point another tenant's traffic at yourself, or to make two
--- tenants silently share one identity:
+-- Get any of the three properties below wrong and a value in this column
+-- becomes a way to point another tenant's traffic at yourself, to make two
+-- tenants silently share one identity, or to make a tenant's booking page
+-- unreachable by either URL:
 --
 --   1. UNIQUENESS. Two `customers` rows sharing one `custom_domain` would make
 --      `getTenantByHost`'s `.maybeSingle()` resolve nondeterministically
@@ -39,6 +40,23 @@
 --      makes the column's own byte representation the normalized form, so the
 --      partial unique index can actually enforce uniqueness of the HOST, not
 --      merely of one spelling of it.
+--   3. NEVER A PLATFORM HOST. `src/lib/request-host.ts`'s `isPlatformSharedHost`
+--      treats `booking.aligncompass.com`, `localhost`, and every `*.vercel.app`
+--      host as never a tenant's `custom_domain` — `getTenantByHost` is never
+--      even called for those hosts, `/` skips straight to the shared landing
+--      page. If one of them were EVER stored here anyway (this column has no
+--      request-facing writer today, but the constraint should not depend on
+--      that staying true), the affected tenant becomes unreachable by BOTH
+--      routes at once: `/<slug>` on that host permanently-redirects to `/`
+--      (`tenant.customDomain === host`), and `/` on that same host never
+--      resolves a tenant to redirect *to*, because the shared-host
+--      short-circuit runs first. That is an availability bug, not a data leak
+--      — no other tenant's data is exposed — but it is silent (no error,
+--      just a booking page that quietly stops resolving) and this migration
+--      is the one place positioned to make it impossible rather than merely
+--      unlikely. The check constraint below is the DB-level mirror of
+--      `isPlatformSharedHost`; keep the two in sync by hand — Postgres has no
+--      way to import a TypeScript predicate.
 --
 -- Nullable, because most tenants have none (the `customer_id` there is
 -- resolved from `/<slug>` and never touches this column) — the partial index
@@ -91,6 +109,33 @@ begin
 end
 $$;
 
+-- See "NEVER A PLATFORM HOST" above — the DB-level mirror of
+-- `isPlatformSharedHost` in src/lib/request-host.ts. Runs after the lowercase
+-- constraint above (both are checked on every write regardless of order, but
+-- this one's error message assumes an already-lowercased value, since a
+-- caller failing the lowercase check fails on that constraint first).
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'customers_custom_domain_not_platform_host'
+      and conrelid = 'public.customers'::regclass
+  ) then
+    alter table public.customers
+      add constraint customers_custom_domain_not_platform_host
+        check (
+          custom_domain is null
+          or (
+            custom_domain <> 'booking.aligncompass.com'
+            and custom_domain <> 'localhost'
+            and custom_domain not like '%.vercel.app'
+          )
+        );
+  end if;
+end
+$$;
+
 -- See "UNIQUENESS" above. Partial (`where custom_domain is not null`) so any
 -- number of tenants may share the common case of having none.
 create unique index if not exists customers_custom_domain_key
@@ -129,6 +174,21 @@ begin
       '0008: check constraint customers_custom_domain_lowercase is missing. '
       'Without it, two differently-cased spellings of the same host could '
       'both be stored, defeating the partial unique index below.';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'customers_custom_domain_not_platform_host'
+      and conrelid = 'public.customers'::regclass
+      and contype = 'c'
+  ) then
+    raise exception
+      '0008: check constraint customers_custom_domain_not_platform_host is '
+      'missing. Without it, a value like booking.aligncompass.com or a '
+      '*.vercel.app host could be stored, silently making that tenant '
+      'unreachable via BOTH the slug route (permanently-redirects to /) and '
+      'the shared host (never resolves a tenant to redirect to).';
   end if;
 
   if not exists (

@@ -476,6 +476,18 @@ const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const CUSTOM_DOMAIN_PATTERN =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
+/**
+ * Mirrors `isPlatformSharedHost` in `src/lib/request-host.ts` and migration
+ * 0008's `customers_custom_domain_not_platform_host` check constraint. This
+ * script is plain Node/`pg`, not the Next app, so it cannot import the
+ * TypeScript source — keep this list in sync with both by hand. Rejected here
+ * for a clear CLI error; the DB constraint is the backstop if this script is
+ * ever bypassed.
+ */
+function isPlatformSharedHost(host) {
+  return host === "booking.aligncompass.com" || host === "localhost" || host.endsWith(".vercel.app");
+}
+
 /** `HH:MM` or `HH:MM:SS`, 24h. Matches what `time` accepts and the UI renders. */
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
 
@@ -530,6 +542,15 @@ function validateSpec(spec) {
       throw new SpecError(
         `customDomain must be a lowercase DNS hostname (e.g. ` +
           `booking.example.com), got: ${spec.customDomain}`,
+      );
+    }
+    if (isPlatformSharedHost(spec.customDomain)) {
+      throw new SpecError(
+        `customDomain cannot be one of the platform's own hosts ` +
+          `(booking.aligncompass.com, localhost, or any *.vercel.app host) — ` +
+          `got: ${spec.customDomain}. The app never resolves a tenant for ` +
+          `these hosts, so this tenant's booking page would become ` +
+          `unreachable via both the slug route and the shared host.`,
       );
     }
   }

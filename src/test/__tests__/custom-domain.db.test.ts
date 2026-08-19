@@ -16,16 +16,28 @@ import { hasTestDatabase, withRollback } from "@/test/supabase-harness";
  * `getTenantByHost`'s own code against a fake — it has to be proved against
  * the constraint itself.
  *
+ * A third property, added after review: `custom_domain` must never equal one
+ * of the platform's own hosts (`booking.aligncompass.com`, `localhost`, any
+ * `*.vercel.app`) — `isPlatformSharedHost` in `src/lib/request-host.ts` treats
+ * those as never a tenant's domain and skips `getTenantByHost` for them
+ * entirely, so a row that slipped past validation and claimed one would
+ * become unreachable via both the slug route (permanently-redirects to `/`)
+ * and the shared host (never resolves a tenant to redirect to). Availability,
+ * not a leak — but silent, and this is the one place positioned to make it
+ * impossible.
+ *
  * ## Falsification (done by hand while building this, reverted after)
  *
- * Both "accepted" assertions below were run against migration 0008 with the
- * check constraint, then the unique index, each individually commented out:
+ * Each "accepted" assertion below was run against migration 0008 with its
+ * corresponding constraint individually commented out:
  *   - Without `customers_custom_domain_lowercase`: the uppercase-host insert
  *     that "rejects a non-lowercase custom_domain" expects to fail instead
  *     succeeded, turning that test red.
  *   - Without `customers_custom_domain_key`: the duplicate-value insert that
  *     "rejects two customers sharing one custom_domain" expects to fail
  *     instead succeeded, turning that test red.
+ *   - Without `customers_custom_domain_not_platform_host`: the
+ *     `booking.aligncompass.com` insert below succeeded instead of failing.
  *
  * Skips (does not fail) when `TEST_DATABASE_URL` is unset — see the harness
  * docstring.
@@ -90,6 +102,42 @@ describe.skipIf(!hasTestDatabase)("customers.custom_domain (migration 0008)", ()
           ["Second Claimant", "custom-domain-fixture-4b", "booking.shared-host.example"],
         ),
       ).rejects.toMatchObject({ code: SQLSTATE_UNIQUE_VIOLATION } satisfies PgError);
+    });
+  });
+
+  it("rejects the platform's own shared host as a custom_domain", async () => {
+    await withRollback(async (db) => {
+      await expect(
+        db.query(
+          `insert into public.customers (name, slug, custom_domain)
+           values ($1, $2, $3)`,
+          ["Hijack Attempt", "custom-domain-fixture-6", "booking.aligncompass.com"],
+        ),
+      ).rejects.toMatchObject({ code: SQLSTATE_CHECK_VIOLATION } satisfies PgError);
+    });
+  });
+
+  it("rejects a *.vercel.app host as a custom_domain", async () => {
+    await withRollback(async (db) => {
+      await expect(
+        db.query(
+          `insert into public.customers (name, slug, custom_domain)
+           values ($1, $2, $3)`,
+          ["Hijack Attempt 2", "custom-domain-fixture-7", "some-preview.vercel.app"],
+        ),
+      ).rejects.toMatchObject({ code: SQLSTATE_CHECK_VIOLATION } satisfies PgError);
+    });
+  });
+
+  it("rejects localhost as a custom_domain", async () => {
+    await withRollback(async (db) => {
+      await expect(
+        db.query(
+          `insert into public.customers (name, slug, custom_domain)
+           values ($1, $2, $3)`,
+          ["Hijack Attempt 3", "custom-domain-fixture-8", "localhost"],
+        ),
+      ).rejects.toMatchObject({ code: SQLSTATE_CHECK_VIOLATION } satisfies PgError);
     });
   });
 
