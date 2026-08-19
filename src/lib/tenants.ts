@@ -26,10 +26,11 @@ import type {
  *
  * The single chokepoint for tenant-scoped reads. Every query goes through the
  * server-only service-role client (`createServiceRoleClient`) and *always*
- * filters by `customer_id` — the mandated defense-in-depth filter. Resolving the
- * tenant by slug is the one lookup that isn't yet customer-scoped (it produces
- * the id everything else is scoped by). Keeping this behind `server-only`
- * guarantees tenant resolution never ships to the browser.
+ * filters by `customer_id` — the mandated defense-in-depth filter. Resolving
+ * the tenant by slug or by host are the two lookups that aren't yet
+ * customer-scoped (each produces the id everything else is scoped by).
+ * Keeping this behind `server-only` guarantees tenant resolution never ships
+ * to the browser.
  */
 
 export async function getTenantBySlug(slug: string): Promise<Tenant | null> {
@@ -38,6 +39,33 @@ export async function getTenantBySlug(slug: string): Promise<Tenant | null> {
     .from("customers")
     .select("id, name, slug, branding_json")
     .eq("slug", slug)
+    .maybeSingle<CustomerRow>();
+
+  if (error) throw error;
+  return data ? mapTenant(data) : null;
+}
+
+/**
+ * Resolve a tenant by its custom domain (`customers.custom_domain`, migration
+ * 0008 / ALI-115). The second of exactly two sanctioned bootstrap lookups
+ * (the other is `getTenantBySlug` above) — the ones allowed to run before a
+ * `customer_id` exists to scope anything else by.
+ *
+ * `host` must already be lowercased and stripped of a trailing `:port` by the
+ * **caller**. This function performs an exact `eq` match only — zero
+ * normalization of its own — so `Booking.Example.com` or
+ * `booking.example.com:3000` will not match a row stored as
+ * `booking.example.com`. Middleware (a later phase) is the intended caller and
+ * owns that normalization; see `isPlatformHost` in `src/lib/platform-host.ts`
+ * for the companion check that decides whether a host should even reach this
+ * lookup.
+ */
+export async function getTenantByHost(host: string): Promise<Tenant | null> {
+  const supabase = createServiceRoleClient();
+  const { data, error } = await supabase
+    .from("customers")
+    .select("id, name, slug, branding_json")
+    .eq("custom_domain", host)
     .maybeSingle<CustomerRow>();
 
   if (error) throw error;

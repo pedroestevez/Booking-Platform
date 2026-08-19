@@ -14,7 +14,22 @@ services + availability and writes bookings through this database (the old
 | `migrations/0004_tenant_members.sql` | Maps a signed-in admin (Clerk `auth_subject`) to the tenant(s) they manage. |
 | `migrations/0005_stripe_connect.sql` | Per-tenant Stripe Connect (Express) account columns on `customers`. |
 | `migrations/0007_guest_identity_no_overwrite.sql` | Makes an existing `end_customers` row immutable to the anonymous booking path: `resolve_or_create_end_customer()` now resolves-or-creates and never updates, so a second booker who types a known email can no longer overwrite that guest's stored `name`/`phone` (which, because bookings reference `end_customer_id`, rewrote the guest name on their past bookings too). What the request supplied is recorded on the booking instead, under the reserved server-authoritative `custom_fields.guest_supplied` key. Closes ALI-167. |
+| `migrations/0008_custom_domain.sql` | Adds a nullable `customers.custom_domain` column plus a unique index, so a tenant can be resolved by request host as well as by slug. Foundation only — see below. Part of ALI-115. |
 | `seed.sql` | Two demo tenants + their services/availability, for local dev and demos. |
+
+### Custom domains (ALI-115) are a database column, not a DNS action
+
+`migrations/0008_custom_domain.sql` and `scripts/provision-tenant.mjs`'s
+`--custom-domain` flag only ever write `customers.custom_domain` — a text
+value the app can later match a request host against. Neither one calls
+Vercel, a registrar, or any DNS API. Actually serving a tenant on
+`booking.<their-domain>.com` still requires two manual, out-of-band ops steps
+that happen outside this repo: adding the domain to the Vercel project (so
+Vercel accepts and routes the incoming host), and the tenant (or whoever
+manages their DNS) pointing a `CNAME`/`A` record at Vercel. Until both of
+those are done by hand, setting `custom_domain` in the database has no
+externally visible effect — it just makes the row ready for the day
+middleware (a later phase) starts resolving tenants by host.
 
 ## Applying
 

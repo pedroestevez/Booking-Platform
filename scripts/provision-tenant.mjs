@@ -176,6 +176,11 @@ Options:
   --spec <file>            JSON spec: { slug, name, branding, services, availabilityRules }
   --slug <slug>            Tenant slug (public URL segment)
   --name <name>            Tenant display name
+  --custom-domain <host>   Custom domain (ALI-115), e.g. booking.acme.com.
+                           Must start with "booking." and be a syntactically
+                           valid hostname. Unset by default; on an existing
+                           tenant it is left untouched unless this invocation
+                           supplies it.
   --timezone <iana>        branding_json.timezone, e.g. America/New_York
   --currency <iso4217>     branding_json.currency, e.g. USD
   --brand-color <css>      branding_json.brandColor
@@ -247,6 +252,10 @@ function parseArgs(argv) {
         break;
       case "--name":
         flags.name = valueOf(i, arg);
+        i += 1;
+        break;
+      case "--custom-domain":
+        flags.customDomain = valueOf(i, arg);
         i += 1;
         break;
       case "--timezone":
@@ -358,9 +367,14 @@ function parseRuleFlag(value) {
  */
 async function buildSpec(flags) {
   const spec = structuredClone(DRAFT_SPEC);
+  // Not part of the P4 draft: no default tenant ever has one, so CREATE fills
+  // it from the flag/spec if given and otherwise leaves it null — never a
+  // guessed value.
+  spec.customDomain = null;
   const supplied = {
     slug: false,
     name: false,
+    customDomain: false,
     /** Branding keys this invocation named, and only those. */
     branding: new Set(),
     services: false,
@@ -393,6 +407,7 @@ async function buildSpec(flags) {
     }
     if ("slug" in parsed) supplied.slug = true;
     if ("name" in parsed) supplied.name = true;
+    if ("customDomain" in parsed) supplied.customDomain = true;
     if ("services" in parsed) supplied.services = true;
     if ("availabilityRules" in parsed) supplied.availabilityRules = true;
 
@@ -424,6 +439,10 @@ async function buildSpec(flags) {
     spec.name = flags.name;
     supplied.name = true;
   }
+  if (flags.customDomain !== undefined) {
+    spec.customDomain = flags.customDomain;
+    supplied.customDomain = true;
+  }
   if (flags.services.length > 0) {
     spec.services = flags.services.map(parseServiceFlag);
     supplied.services = true;
@@ -445,6 +464,18 @@ async function buildSpec(flags) {
  * link to — better rejected here than provisioned and discovered later.
  */
 const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * A custom domain (ALI-115) must follow the fixed platform convention —
+ * `booking.<their-domain>.com` — and be a syntactically valid hostname:
+ * lowercase letters, digits and hyphens per label, at least two labels after
+ * the required `booking.` prefix. Uppercase, whitespace, a scheme, a path or
+ * a port would all be silently unreachable as a `Host` header match (see
+ * `getTenantByHost` in `src/lib/tenants.ts`, which does an exact match with
+ * no normalization of its own) — better rejected here than provisioned and
+ * discovered later.
+ */
+const CUSTOM_DOMAIN_PATTERN = /^booking\.[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
 /** `HH:MM` or `HH:MM:SS`, 24h. Matches what `time` accepts and the UI renders. */
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
@@ -493,6 +524,19 @@ function validateSpec(spec) {
     );
   }
   requireNonEmptyString(spec.name, "name");
+
+  // Nullable and unset by default — most tenants never set one (0008). Only
+  // validated when present, so an unsupplied/`null` custom domain never fails
+  // provisioning.
+  if (spec.customDomain !== null && spec.customDomain !== undefined) {
+    requireNonEmptyString(spec.customDomain, "customDomain");
+    if (!CUSTOM_DOMAIN_PATTERN.test(spec.customDomain)) {
+      throw new SpecError(
+        `customDomain must start with "booking." and be a syntactically valid ` +
+          `hostname (e.g. booking.acme.com), got: ${spec.customDomain}`,
+      );
+    }
+  }
 
   const branding = spec.branding;
   if (branding === null || typeof branding !== "object") {
@@ -686,11 +730,21 @@ async function createTenant(client, spec) {
 
   try {
     await client.query(
-      `insert into public.customers (id, name, slug, branding_json)
-       values ($1, $2, $3, $4::jsonb)`,
-      [id, spec.name, spec.slug, JSON.stringify(spec.branding)],
+      `insert into public.customers (id, name, slug, custom_domain, branding_json)
+       values ($1, $2, $3, $4, $5::jsonb)`,
+      [id, spec.name, spec.slug, spec.customDomain, JSON.stringify(spec.branding)],
     );
   } catch (err) {
+    if (err.code === "23505" && err.constraint === "customers_custom_domain_key") {
+      // Same shape as the slug conflict below, but for the other unique column
+      // this insert can hit: two tenants provisioned with the same
+      // custom_domain. Named separately from the slug case because the two
+      // mean different things to an operator reading the failure.
+      throw new ProvisionError(
+        `custom domain '${spec.customDomain}' is already assigned to another ` +
+          "tenant. Nothing was changed.",
+      );
+    }
     if (err.code === "23505") {
       // The row exists but `findTenant` could not see it. Under 0002's
       // `force row level security` that is what a role WITHOUT BYPASSRLS sees —
@@ -735,6 +789,10 @@ async function updateTenant(client, customerId, spec, supplied) {
     params.push(spec.name);
     sets.push(`name = $${params.length}`);
   }
+  if (supplied.customDomain) {
+    params.push(spec.customDomain);
+    sets.push(`custom_domain = $${params.length}`);
+  }
   if (Object.keys(brandingPatch).length > 0) {
     params.push(JSON.stringify(brandingPatch));
     sets.push(
@@ -743,16 +801,34 @@ async function updateTenant(client, customerId, spec, supplied) {
   }
 
   if (sets.length === 0) {
-    return { name: false, brandingKeys: [] };
+    return { name: false, customDomain: false, brandingKeys: [] };
   }
 
   // Column names are literals from this file; every value is a placeholder.
-  await client.query(
-    `update public.customers set ${sets.join(", ")} where id = $1`,
-    params,
-  );
+  try {
+    await client.query(
+      `update public.customers set ${sets.join(", ")} where id = $1`,
+      params,
+    );
+  } catch (err) {
+    if (err.code === "23505" && err.constraint === "customers_custom_domain_key") {
+      // `custom_domain` is the only unique column this function ever writes,
+      // so a 23505 here can only mean this value collides with a different
+      // tenant's row — surfaced plainly rather than as a raw Postgres error,
+      // mirroring `createTenant`'s slug-conflict handling above.
+      throw new ProvisionError(
+        `custom domain '${spec.customDomain}' is already assigned to another ` +
+          "tenant. Nothing was changed.",
+      );
+    }
+    throw err;
+  }
 
-  return { name: supplied.name, brandingKeys: Object.keys(brandingPatch) };
+  return {
+    name: supplied.name,
+    customDomain: supplied.customDomain,
+    brandingKeys: Object.keys(brandingPatch),
+  };
 }
 
 /** Converge `services` by `(customer_id, name)`. Never deletes. */
@@ -915,11 +991,15 @@ async function provision(client, spec, supplied, { dryRun }) {
     const created = existingId === undefined;
 
     let customerId;
-    let tenantWrites = { name: true, brandingKeys: [] };
+    let tenantWrites = { name: true, customDomain: false, brandingKeys: [] };
     if (created) {
       requireExplicitCatalogueForNewTenant(spec, supplied);
       customerId = await createTenant(client, spec);
-      tenantWrites = { name: true, brandingKeys: Object.keys(spec.branding) };
+      tenantWrites = {
+        name: true,
+        customDomain: spec.customDomain !== null,
+        brandingKeys: Object.keys(spec.branding),
+      };
     } else {
       customerId = existingId;
       tenantWrites = await updateTenant(client, customerId, spec, supplied);
@@ -958,12 +1038,13 @@ function reportTenantWrites(report) {
   }
   const wrote = [];
   if (report.tenantWrites.name) wrote.push("name");
+  if (report.tenantWrites.customDomain) wrote.push("custom_domain");
   for (const key of report.tenantWrites.brandingKeys) wrote.push(`branding.${key}`);
   console.log(
     wrote.length > 0
       ? `provision-tenant: tenant updated (${report.customerId}) — wrote ${wrote.join(", ")}`
       : `provision-tenant: tenant unchanged (${report.customerId}) — no ` +
-          "name or branding value was supplied, so none was written",
+          "name, custom_domain or branding value was supplied, so none was written",
   );
 }
 
@@ -1071,7 +1152,8 @@ async function main() {
 
     console.log(
       `provision-tenant: ${flags.dryRun ? "DRY RUN — " : ""}slug=${spec.slug}, ` +
-        `supplied: name=${supplied.name}, branding=[${[...supplied.branding].join(",") || "none"}], ` +
+        `supplied: name=${supplied.name}, customDomain=${supplied.customDomain}, ` +
+        `branding=[${[...supplied.branding].join(",") || "none"}], ` +
         `services=${supplied.services}, rules=${supplied.availabilityRules}`,
     );
 
