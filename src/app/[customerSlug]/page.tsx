@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 
 import { BookingFlow } from "@/components/booking/booking-flow";
@@ -26,8 +27,16 @@ export async function generateMetadata({
   const { customerSlug } = await params;
   const tenant = await getTenantBySlug(customerSlug);
   if (!tenant) return { title: "Not found" };
+
+  // On a tenant's custom domain, the platform's own branding (the root
+  // layout's "%s · Booking Platform" title template) has no business
+  // showing up in the tab title — an `{ absolute }` title bypasses the
+  // template entirely (ALI-115).
+  const onCustomDomain = (await headers()).get("x-booking-custom-domain") === "1";
   return {
-    title: `Book with ${tenant.name}`,
+    title: onCustomDomain
+      ? { absolute: `Book with ${tenant.name}` }
+      : `Book with ${tenant.name}`,
     description: tenant.branding.tagline,
   };
 }
@@ -36,6 +45,10 @@ export default async function TenantBookingPage({ params }: PageProps) {
   const { customerSlug } = await params;
   const tenant = await getTenantBySlug(customerSlug);
   if (!tenant) notFound();
+
+  // White-labeled: a tenant reached via their own custom domain gets no
+  // "Powered by Booking Platform" attribution (ALI-115).
+  const onCustomDomain = (await headers()).get("x-booking-custom-domain") === "1";
 
   // Tenant-scoped reads — every query is keyed by the resolved customer id.
   const [services, rules, blocked, bookings] = await Promise.all([
@@ -85,12 +98,14 @@ export default async function TenantBookingPage({ params }: PageProps) {
           />
         </main>
 
-        <footer className="mt-10 text-center">
-          <p className="text-xs text-muted-foreground">
-            Powered by{" "}
-            <span className="font-medium text-foreground/70">Booking Platform</span>
-          </p>
-        </footer>
+        {!onCustomDomain && (
+          <footer className="mt-10 text-center">
+            <p className="text-xs text-muted-foreground">
+              Powered by{" "}
+              <span className="font-medium text-foreground/70">Booking Platform</span>
+            </p>
+          </footer>
+        )}
       </div>
     </TenantTheme>
   );
