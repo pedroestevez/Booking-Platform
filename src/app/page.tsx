@@ -1,32 +1,97 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight, CalendarCheck } from "lucide-react";
 
+import { TenantBookingPage } from "@/components/booking/tenant-booking-page";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { isPlatformSharedHost, resolveRequestHost } from "@/lib/request-host";
 import { tenantIndexEnabled } from "@/lib/tenant-index";
-import { getAllTenants } from "@/lib/tenants";
+import {
+  getActiveServices,
+  getAllTenants,
+  getAvailabilityRules,
+  getBlockedSlots,
+  getTenantByHost,
+  getUpcomingBookings,
+} from "@/lib/tenants";
 import type { Tenant } from "@/lib/types";
 
 /**
  * Kept `force-dynamic` deliberately, even though the production render below
- * reads nothing (ALI-176 criterion 3). The route is rendered per request, so no
- * build can ever bake a tenant list into a static artifact — if the gate is one
- * day loosened, the blast radius stays "this request", not "every request until
- * the next deploy". The gated-off path issues no query, so there is nothing to
- * cache anyway.
+ * reads nothing for the platform's own hosts (ALI-176 criterion 3). The route
+ * is rendered per request, so no build can ever bake a tenant list — or now, a
+ * custom-domain tenant's booking page — into a static artifact. The
+ * platform-host path issues no query, so there is nothing to cache anyway.
  */
 export const dynamic = "force-dynamic";
 
 /**
- * Platform root. This app is addressed per tenant at `/<slug>`; the tenant list
- * below is a **development-only** index, gated by `tenantIndexEnabled()`.
+ * ALI-211: a tenant on its own custom domain gets the slug route's metadata
+ * (same title/description shape) with no `/<slug>` in the URL. The platform's
+ * own hosts (`booking.aligncompass.com`, `*.vercel.app`, `localhost`) never
+ * reach `getTenantByHost` — `isPlatformSharedHost` short-circuits first, so
+ * there is no query and this falls through to Next's default metadata, same
+ * as before this feature existed.
+ */
+export async function generateMetadata(): Promise<Metadata> {
+  const host = await resolveRequestHost();
+  if (!host || isPlatformSharedHost(host)) return {};
+
+  const tenant = await getTenantByHost(host);
+  if (!tenant) return {};
+
+  return {
+    title: `Book with ${tenant.name}`,
+    description: tenant.branding.tagline,
+  };
+}
+
+/**
+ * Platform root. This app is addressed per tenant at `/<slug>` (unchanged) OR,
+ * since ALI-211, directly at `/` on a tenant's own custom domain — resolved
+ * from the request's Host header via `getTenantByHost`. The tenant list
+ * further down is a **development-only** index, gated by
+ * `tenantIndexEnabled()`.
  *
- * In production the root renders the header and nothing else: no tenant name,
- * no slug, and no query — `getAllTenants()` is not called at all, so the
- * absence does not depend on the render being tidy. See `tenantIndexEnabled`
- * for why the gate is a single positive condition.
+ * Host resolution happens here, in the page, not in `src/middleware.ts`: the
+ * matcher there is scoped to `/admin` on purpose (widening it to `/` 404s the
+ * homepage whenever Clerk env vars are absent — see that file), and this needs
+ * no edge-runtime behavior, only a header read plus a Supabase call — which
+ * edge middleware cannot make either.
+ *
+ * `isPlatformSharedHost` is checked BEFORE any database call: the platform's
+ * own hosts are never a tenant's `custom_domain` (see `request-host.ts`), so
+ * skipping the query there is not an optimization that could go stale — it is
+ * the same fact both branches already know.
  */
 export default async function HomePage() {
+  const host = await resolveRequestHost();
+
+  if (host && !isPlatformSharedHost(host)) {
+    const tenant = await getTenantByHost(host);
+    if (tenant) {
+      const [services, rules, blocked, bookings] = await Promise.all([
+        getActiveServices(tenant.id),
+        getAvailabilityRules(tenant.id),
+        getBlockedSlots(tenant.id),
+        getUpcomingBookings(tenant.id),
+      ]);
+
+      return (
+        <TenantBookingPage
+          tenant={tenant}
+          services={services}
+          rules={rules}
+          blocked={blocked}
+          bookings={bookings}
+        />
+      );
+    }
+    // No tenant claims this host — fall through to the landing page below,
+    // exactly as if the host had been a platform-shared one.
+  }
+
   const tenants = tenantIndexEnabled() ? await getAllTenants() : null;
 
   return (

@@ -137,6 +137,10 @@ const DRAFT_SPEC = {
     // nobody was notified, but offers no way to fix that.
     contactEmail: "pedroestevez001@gmail.com",
   },
+  // No `customDomain` in the draft (ALI-211): unlike `branding`, this is not
+  // filled in for a tenant being created from scratch — it is set only when
+  // an operator explicitly passes `--custom-domain`, for exactly one tenant
+  // (pedroestevez), never as a draft default other tenants would inherit.
   services: [
     {
       name: "Interview — 30 min",
@@ -184,6 +188,12 @@ Options:
   --contact-email <addr>   branding_json.contactEmail — the fallback contact
                            offered on the confirmation screen when no
                            notification email could be sent
+  --custom-domain <host>   customers.custom_domain (ALI-211) — the host this
+                           tenant is addressed at directly (e.g.
+                           booking.pedroestevez.com), with no /<slug> prefix.
+                           Lowercase only, matching the column's check
+                           constraint. Not part of the P4 draft: set only when
+                           this flag is passed, never inherited on create.
   --service '<name>|<minutes>|<price_cents>[|<description>]'
                            Repeatable. Any --service replaces the whole list.
   --rule '<days>|<start>|<end>|<buffer>'
@@ -271,6 +281,10 @@ function parseArgs(argv) {
         break;
       case "--contact-email":
         flags.contactEmail = valueOf(i, arg);
+        i += 1;
+        break;
+      case "--custom-domain":
+        flags.customDomain = valueOf(i, arg);
         i += 1;
         break;
       case "--service":
@@ -365,6 +379,7 @@ async function buildSpec(flags) {
     branding: new Set(),
     services: false,
     availabilityRules: false,
+    customDomain: false,
   };
 
   if (flags.specPath) {
@@ -395,6 +410,7 @@ async function buildSpec(flags) {
     if ("name" in parsed) supplied.name = true;
     if ("services" in parsed) supplied.services = true;
     if ("availabilityRules" in parsed) supplied.availabilityRules = true;
+    if ("customDomain" in parsed) supplied.customDomain = true;
 
     Object.assign(spec, parsed, {
       branding: { ...spec.branding, ...(parsed.branding ?? {}) },
@@ -424,6 +440,10 @@ async function buildSpec(flags) {
     spec.name = flags.name;
     supplied.name = true;
   }
+  if (flags.customDomain !== undefined) {
+    spec.customDomain = flags.customDomain;
+    supplied.customDomain = true;
+  }
   if (flags.services.length > 0) {
     spec.services = flags.services.map(parseServiceFlag);
     supplied.services = true;
@@ -445,6 +465,28 @@ async function buildSpec(flags) {
  * link to — better rejected here than provisioned and discovered later.
  */
 const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * A `custom_domain` (ALI-211) is a full DNS hostname, not a URL segment: dot-
+ * separated labels, each starting/ending alphanumeric. Lowercase-only, no
+ * uppercase alternative — mirrors migration 0008's
+ * `customers_custom_domain_lowercase` check constraint exactly, so an invalid
+ * value is rejected here rather than by a 23514 after the insert.
+ */
+const CUSTOM_DOMAIN_PATTERN =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
+/**
+ * Mirrors `isPlatformSharedHost` in `src/lib/request-host.ts` and migration
+ * 0008's `customers_custom_domain_not_platform_host` check constraint. This
+ * script is plain Node/`pg`, not the Next app, so it cannot import the
+ * TypeScript source — keep this list in sync with both by hand. Rejected here
+ * for a clear CLI error; the DB constraint is the backstop if this script is
+ * ever bypassed.
+ */
+function isPlatformSharedHost(host) {
+  return host === "booking.aligncompass.com" || host === "localhost" || host.endsWith(".vercel.app");
+}
 
 /** `HH:MM` or `HH:MM:SS`, 24h. Matches what `time` accepts and the UI renders. */
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
@@ -493,6 +535,25 @@ function validateSpec(spec) {
     );
   }
   requireNonEmptyString(spec.name, "name");
+
+  if (spec.customDomain !== undefined) {
+    requireNonEmptyString(spec.customDomain, "customDomain");
+    if (!CUSTOM_DOMAIN_PATTERN.test(spec.customDomain)) {
+      throw new SpecError(
+        `customDomain must be a lowercase DNS hostname (e.g. ` +
+          `booking.example.com), got: ${spec.customDomain}`,
+      );
+    }
+    if (isPlatformSharedHost(spec.customDomain)) {
+      throw new SpecError(
+        `customDomain cannot be one of the platform's own hosts ` +
+          `(booking.aligncompass.com, localhost, or any *.vercel.app host) — ` +
+          `got: ${spec.customDomain}. The app never resolves a tenant for ` +
+          `these hosts, so this tenant's booking page would become ` +
+          `unreachable via both the slug route and the shared host.`,
+      );
+    }
+  }
 
   const branding = spec.branding;
   if (branding === null || typeof branding !== "object") {
@@ -686,9 +747,15 @@ async function createTenant(client, spec) {
 
   try {
     await client.query(
-      `insert into public.customers (id, name, slug, branding_json)
-       values ($1, $2, $3, $4::jsonb)`,
-      [id, spec.name, spec.slug, JSON.stringify(spec.branding)],
+      `insert into public.customers (id, name, slug, branding_json, custom_domain)
+       values ($1, $2, $3, $4::jsonb, $5)`,
+      [
+        id,
+        spec.name,
+        spec.slug,
+        JSON.stringify(spec.branding),
+        spec.customDomain ?? null,
+      ],
     );
   } catch (err) {
     if (err.code === "23505") {
@@ -741,9 +808,13 @@ async function updateTenant(client, customerId, spec, supplied) {
       `branding_json = coalesce(branding_json, '{}'::jsonb) || $${params.length}::jsonb`,
     );
   }
+  if (supplied.customDomain) {
+    params.push(spec.customDomain);
+    sets.push(`custom_domain = $${params.length}`);
+  }
 
   if (sets.length === 0) {
-    return { name: false, brandingKeys: [] };
+    return { name: false, brandingKeys: [], customDomain: false };
   }
 
   // Column names are literals from this file; every value is a placeholder.
@@ -752,7 +823,11 @@ async function updateTenant(client, customerId, spec, supplied) {
     params,
   );
 
-  return { name: supplied.name, brandingKeys: Object.keys(brandingPatch) };
+  return {
+    name: supplied.name,
+    brandingKeys: Object.keys(brandingPatch),
+    customDomain: supplied.customDomain,
+  };
 }
 
 /** Converge `services` by `(customer_id, name)`. Never deletes. */
@@ -919,7 +994,11 @@ async function provision(client, spec, supplied, { dryRun }) {
     if (created) {
       requireExplicitCatalogueForNewTenant(spec, supplied);
       customerId = await createTenant(client, spec);
-      tenantWrites = { name: true, brandingKeys: Object.keys(spec.branding) };
+      tenantWrites = {
+        name: true,
+        brandingKeys: Object.keys(spec.branding),
+        customDomain: spec.customDomain !== undefined,
+      };
     } else {
       customerId = existingId;
       tenantWrites = await updateTenant(client, customerId, spec, supplied);
@@ -959,11 +1038,12 @@ function reportTenantWrites(report) {
   const wrote = [];
   if (report.tenantWrites.name) wrote.push("name");
   for (const key of report.tenantWrites.brandingKeys) wrote.push(`branding.${key}`);
+  if (report.tenantWrites.customDomain) wrote.push("customDomain");
   console.log(
     wrote.length > 0
       ? `provision-tenant: tenant updated (${report.customerId}) — wrote ${wrote.join(", ")}`
       : `provision-tenant: tenant unchanged (${report.customerId}) — no ` +
-          "name or branding value was supplied, so none was written",
+          "name, branding or customDomain value was supplied, so none was written",
   );
 }
 
@@ -1072,7 +1152,8 @@ async function main() {
     console.log(
       `provision-tenant: ${flags.dryRun ? "DRY RUN — " : ""}slug=${spec.slug}, ` +
         `supplied: name=${supplied.name}, branding=[${[...supplied.branding].join(",") || "none"}], ` +
-        `services=${supplied.services}, rules=${supplied.availabilityRules}`,
+        `services=${supplied.services}, rules=${supplied.availabilityRules}, ` +
+        `customDomain=${supplied.customDomain}`,
     );
 
     const report = await provision(client, spec, supplied, {

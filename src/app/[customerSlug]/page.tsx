@@ -1,9 +1,8 @@
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, permanentRedirect } from "next/navigation";
 
-import { BookingFlow } from "@/components/booking/booking-flow";
-import { TenantTheme } from "@/components/booking/tenant-theme";
-import { isEmailConfigured } from "@/lib/email/provider";
+import { TenantBookingPage } from "@/components/booking/tenant-booking-page";
+import { resolveRequestHost } from "@/lib/request-host";
 import {
   getActiveServices,
   getAvailabilityRules,
@@ -32,10 +31,29 @@ export async function generateMetadata({
   };
 }
 
-export default async function TenantBookingPage({ params }: PageProps) {
+export default async function CustomerSlugPage({ params }: PageProps) {
   const { customerSlug } = await params;
   const tenant = await getTenantBySlug(customerSlug);
   if (!tenant) notFound();
+
+  // ALI-211: once a tenant has its own custom domain, the `/<slug>` URL is a
+  // permanent redirect to `/` — but ONLY when the request actually arrived on
+  // THAT tenant's own domain. `tenant.customDomain` being set is a fact about
+  // the tenant, not about this request: `booking.aligncompass.com/<slug>`
+  // must keep working exactly as it does today for a tenant that also has a
+  // custom domain, so the redirect is host-scoped, comparing the resolved
+  // request host against `tenant.customDomain` rather than acting on
+  // `tenant.customDomain`'s mere presence.
+  //
+  // `permanentRedirect` (308), not `redirect` (307): this is a URL that has
+  // permanently moved, matching how browsers and search engines should treat
+  // it going forward — a distinction ALI-211 calls out explicitly.
+  if (tenant.customDomain) {
+    const host = await resolveRequestHost();
+    if (host && host === tenant.customDomain) {
+      permanentRedirect("/");
+    }
+  }
 
   // Tenant-scoped reads — every query is keyed by the resolved customer id.
   const [services, rules, blocked, bookings] = await Promise.all([
@@ -46,52 +64,12 @@ export default async function TenantBookingPage({ params }: PageProps) {
   ]);
 
   return (
-    <TenantTheme
-      branding={tenant.branding}
-      className="min-h-dvh bg-mesh bg-background"
-    >
-      <div className="mx-auto flex min-h-dvh w-full max-w-3xl flex-col px-4 py-8 sm:py-12">
-        <header className="mb-8 text-center">
-          {tenant.branding.logoUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={tenant.branding.logoUrl}
-              alt={tenant.name}
-              className="mx-auto mb-3 h-10 w-auto"
-            />
-          ) : (
-            <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-xl bg-primary text-base font-bold text-primary-foreground shadow-sm">
-              {tenant.name.charAt(0)}
-            </div>
-          )}
-          <h1 className="text-2xl font-semibold tracking-tight">
-            {tenant.name}
-          </h1>
-          {tenant.branding.tagline && (
-            <p className="mt-1 text-sm text-muted-foreground">
-              {tenant.branding.tagline}
-            </p>
-          )}
-        </header>
-
-        <main className="flex-1">
-          <BookingFlow
-            tenant={tenant}
-            services={services}
-            rules={rules}
-            blocked={blocked}
-            bookings={bookings}
-            notificationsEnabled={isEmailConfigured()}
-          />
-        </main>
-
-        <footer className="mt-10 text-center">
-          <p className="text-xs text-muted-foreground">
-            Powered by{" "}
-            <span className="font-medium text-foreground/70">Booking Platform</span>
-          </p>
-        </footer>
-      </div>
-    </TenantTheme>
+    <TenantBookingPage
+      tenant={tenant}
+      services={services}
+      rules={rules}
+      blocked={blocked}
+      bookings={bookings}
+    />
   );
 }
