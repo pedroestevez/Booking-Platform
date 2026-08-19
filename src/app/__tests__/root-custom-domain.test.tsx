@@ -51,8 +51,16 @@ vi.mock("next/headers", () => ({
 }));
 
 vi.mock("@/components/booking/tenant-booking-page", () => ({
-  TenantBookingPage: ({ tenant }: { tenant: Tenant }) => (
-    <div data-testid="tenant-booking-page">{tenant.name}</div>
+  TenantBookingPage: ({
+    tenant,
+    hideBranding,
+  }: {
+    tenant: Tenant;
+    hideBranding?: boolean;
+  }) => (
+    <div data-testid="tenant-booking-page" data-hide-branding={String(Boolean(hideBranding))}>
+      {tenant.name}
+    </div>
   ),
 }));
 
@@ -97,6 +105,10 @@ describe("the platform root — custom-domain tenant resolution", () => {
     // Not the platform landing page.
     expect(html).not.toContain("Booking Platform");
     expect(getAllTenants).not.toHaveBeenCalled();
+
+    // ALI-115: reaching this branch at all means the request is on the
+    // tenant's own custom domain — branding must be hidden unconditionally.
+    expect(html).toContain('data-hide-branding="true"');
   });
 
   it("does not query the database for the platform's own shared host", async () => {
@@ -152,8 +164,11 @@ describe("the platform root — generateMetadata", () => {
     const { generateMetadata } = await import("@/app/page");
     const metadata = await generateMetadata();
 
+    // ALI-115: `{ absolute }`, not a plain string — bypasses the root
+    // layout's "%s · Booking Platform" title template on a tenant's own
+    // domain, the same way the footer badge is hidden.
     expect(metadata).toEqual({
-      title: "Book with Pedro Estevez Coaching",
+      title: { absolute: "Book with Pedro Estevez Coaching" },
       description: "Book time with Pedro",
     });
   });

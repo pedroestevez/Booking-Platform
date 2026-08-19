@@ -33,6 +33,13 @@ export const dynamic = "force-dynamic";
  * reach `getTenantByHost` — `isPlatformSharedHost` short-circuits first, so
  * there is no query and this falls through to Next's default metadata, same
  * as before this feature existed.
+ *
+ * ALI-115: `title` is `{ absolute }` rather than a plain string specifically
+ * so it bypasses the root layout's `"%s · Booking Platform"` template — a
+ * tenant's own domain shouldn't carry the platform's name in the browser tab
+ * any more than it carries the footer badge (see `TenantBookingPage`'s
+ * `hideBranding`, set unconditionally below for the same reason: reaching
+ * this branch at all means the request is on that tenant's own domain).
  */
 export async function generateMetadata(): Promise<Metadata> {
   const host = await resolveRequestHost();
@@ -42,7 +49,7 @@ export async function generateMetadata(): Promise<Metadata> {
   if (!tenant) return {};
 
   return {
-    title: `Book with ${tenant.name}`,
+    title: { absolute: `Book with ${tenant.name}` },
     description: tenant.branding.tagline,
   };
 }
@@ -85,6 +92,7 @@ export default async function HomePage() {
           rules={rules}
           blocked={blocked}
           bookings={bookings}
+          hideBranding
         />
       );
     }
