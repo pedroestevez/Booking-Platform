@@ -16,6 +16,14 @@ import type { AvailabilityRule, BlockedSlot, Booking, Service, Tenant } from "@/
  * `getBlockedSlots`, `getUpcomingBookings`) happens in the caller, keyed on
  * the already-resolved `tenant.id` — this component does no data access of
  * its own.
+ *
+ * `hideBranding` (ALI-115): the "Powered by Booking Platform" footer is the
+ * platform attribution the free tier carries. `/<slug>` always shows it — the
+ * URL itself already says this is a shared platform. A tenant's own custom
+ * domain is what the white-label upgrade actually buys, so the caller passes
+ * `hideBranding` there. This component makes no host/tenant decision of its
+ * own; it only renders what the caller, which already resolved that, tells it
+ * to.
  */
 export function TenantBookingPage({
   tenant,
@@ -23,12 +31,14 @@ export function TenantBookingPage({
   rules,
   blocked,
   bookings,
+  hideBranding = false,
 }: {
   tenant: Tenant;
   services: Service[];
   rules: AvailabilityRule[];
   blocked: BlockedSlot[];
   bookings: Booking[];
+  hideBranding?: boolean;
 }) {
   return (
     <TenantTheme
@@ -70,12 +80,14 @@ export function TenantBookingPage({
           />
         </main>
 
-        <footer className="mt-10 text-center">
-          <p className="text-xs text-muted-foreground">
-            Powered by{" "}
-            <span className="font-medium text-foreground/70">Booking Platform</span>
-          </p>
-        </footer>
+        {!hideBranding && (
+          <footer className="mt-10 text-center">
+            <p className="text-xs text-muted-foreground">
+              Powered by{" "}
+              <span className="font-medium text-foreground/70">Booking Platform</span>
+            </p>
+          </footer>
+        )}
       </div>
     </TenantTheme>
   );
