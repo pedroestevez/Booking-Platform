@@ -314,13 +314,17 @@ export async function createBooking(
   // booking is a slot held pending payment, and saying "you're confirmed" about
   // one would be a lie the guest acts on.
   //
-  // The `try` is the second half of the invariant, and it is deliberately
-  // redundant: `sendBookingConfirmation` already contains every failure it can
-  // produce and never rejects. This catch exists so that remains true if that
-  // ever stops being true — a booking is stored, and no failure in a
-  // notification about it may turn a stored booking into a thrown error the
-  // guest reads as "your booking failed". The safe direction is "booked but not
-  // emailed", never the reverse.
+  // The `try` is the second half of the invariant. It was described here as
+  // "deliberately redundant" — and that claim was false when written (ALI-196
+  // rider 5): `formatWhen` built an `Intl.DateTimeFormat` from tenant-editable
+  // `branding_json.timezone` outside every guard, so a bad timezone threw a
+  // RangeError straight out of a function documented never to reject, and this
+  // catch was the only thing standing between that and a guest being told their
+  // stored booking failed. The throw is fixed at its source; this catch is
+  // redundant again, and stays so that it remains true if that changes — a
+  // booking is stored, and no failure in a notification about it may turn a
+  // stored booking into a thrown error the guest reads as "your booking
+  // failed". The safe direction is "booked but not emailed", never the reverse.
   if (created.status === "confirmed") {
     try {
       await sendBookingConfirmation({

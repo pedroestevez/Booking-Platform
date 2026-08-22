@@ -18,13 +18,24 @@ import type { Booking, GuestDetails, Tenant } from "@/lib/types";
  * ## The invariant this module exists to keep
  *
  * *No email ever claims a booking that is not durably stored, and no failed
- * send ever invalidates a stored booking.* The first half is the caller's:
- * `createBooking` invokes this only after the insert's `.single()` has resolved
- * without error. The second half is this module's, and it is why
- * `sendBookingConfirmation` **never rejects** — every failure is caught,
- * counted and logged here, and the caller is handed an outcome rather than an
- * exception. The safe failure direction is "booked but not emailed"; there is
- * no path in this file that can produce "emailed but not booked".
+ * **or hung** send ever invalidates a stored booking — or the request that
+ * stored it.* The first half is the caller's: `createBooking` invokes this only
+ * after the insert's `.single()` has resolved without error. The second half is
+ * this module's, and it is why `sendBookingConfirmation` **never rejects** —
+ * every failure is caught, counted and logged here, and the caller is handed an
+ * outcome rather than an exception. The safe failure direction is "booked but
+ * not emailed"; there is no path in this file that can produce "emailed but not
+ * booked".
+ *
+ * ## Bounded, since ALI-196
+ *
+ * "Never rejects" was not enough on its own: a send that never *answers* also
+ * never rejects, and until ALI-196 nothing here had a deadline. A stuck vendor
+ * left `createBooking` unreturned past the invocation's own limit, so a booking
+ * that was already committed reached the guest as a failure — and their retry
+ * hit the overlap constraint against their own row. Two changes close it: every
+ * send is bounded at the port (`DEFAULT_SEND_TIMEOUT_MS`), and the sends run
+ * concurrently, so the bound is per-run rather than per-recipient.
  *
  * ## Recipients come from the booking's own tenant, never from configuration
  *
@@ -158,14 +169,47 @@ export async function resolveTenantRecipients(
   return addresses;
 }
 
-/** When and where the appointment is, in the tenant's own timezone. */
+/**
+ * When and where the appointment is, in the tenant's own timezone.
+ *
+ * `Intl.DateTimeFormat` throws `RangeError` on a timezone string it does not
+ * recognise, and `branding_json.timezone` is tenant-editable config, so this is
+ * reachable from data rather than from a bug. It falls back to UTC rather than
+ * propagating: a confirmation that names the time in the wrong zone, labelled
+ * with the zone it used, beats no confirmation at all — and the alternative was
+ * an exception escaping a function whose contract is that it never rejects
+ * (ALI-196 rider 5).
+ */
 function formatWhen(booking: Booking, tenant: Tenant): string {
+  const configured = tenant.branding.timezone;
+  let timeZone = configured;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone });
+  } catch {
+    console.error(
+      `[${EMAIL_OPERATION}] tenant ${booking.customerId} has an unusable ` +
+        `branding timezone; the confirmation for booking ${booking.id} states ` +
+        "times in UTC instead. Fix branding_json.timezone.",
+      {
+        operation: EMAIL_OPERATION,
+        bookingId: booking.id,
+        customerId: booking.customerId,
+        // Redacted like every other free text this module logs: the rule at
+        // the top of the file is that tenant-authored text is held to no
+        // schema, and a timezone field is no more trustworthy than a vendor
+        // message. Flagged by the ALI-196 security pass (observation B).
+        configuredTimezone: redactSensitive(configured),
+      },
+    );
+    timeZone = "UTC";
+  }
+
   const formatter = new Intl.DateTimeFormat("en-US", {
     dateStyle: "full",
     timeStyle: "short",
-    timeZone: tenant.branding.timezone,
+    timeZone,
   });
-  return `${formatter.format(new Date(booking.start))} (${tenant.branding.timezone})`;
+  return `${formatter.format(new Date(booking.start))} (${timeZone})`;
 }
 
 interface Rendered {
@@ -412,14 +456,22 @@ export async function sendBookingConfirmation(
     }
   }
 
-  // The tenant first: Pedro's ruling is that being told a booking happened is
-  // the core release-0.1 outcome, and the guest's copy is the deferrable half.
+  // Concurrently, not in sequence (ALI-196 B1). Each `deliver` is already
+  // isolated — it never throws, and it is now bounded by the provider's
+  // timeout — so running them together costs nothing and removes the failure
+  // this issue was filed for: a first tenant address that hangs used to hold
+  // the guest's copy behind it for the full duration, so one stuck send made
+  // the whole request late rather than one notification late. Worst case is now
+  // one timeout, not one per recipient.
   const tenantEmail = renderTenantEmail(input, tenant, when);
-  for (const address of tenantRecipients) {
-    await deliver(address, "tenant", tenantEmail);
-  }
+  const guestEmail = renderGuestEmail(input, tenant, when);
 
-  await deliver(input.guest.email, "guest", renderGuestEmail(input, tenant, when));
+  await Promise.all([
+    ...tenantRecipients.map((address) =>
+      deliver(address, "tenant", tenantEmail),
+    ),
+    deliver(input.guest.email, "guest", guestEmail),
+  ]);
 
   return outcome;
 }

@@ -109,3 +109,55 @@ describe("icsFilename", () => {
     expect(icsFilename("!!!")).toBe("booking.ics");
   });
 });
+
+describe("ALI-196 rider 4 — a lone carriage return is escaped, not passed through", () => {
+  const CR = String.fromCharCode(13);
+  const LF = String.fromCharCode(10);
+
+  /** The document's own line structure, which CRLF defines. */
+  function descriptionLines(document: string): string[] {
+    return document.split(CR + LF).filter((line) => line.startsWith("DESCRIPTION:"));
+  }
+
+  const base = {
+    uid: "b1@example.test",
+    start: "2026-09-01T10:00:00.000Z",
+    end: "2026-09-01T10:30:00.000Z",
+    summary: "Interview",
+  };
+
+  // The bug: /\r?\n/ requires the LF, so a bare CR never matched and reached
+  // DESCRIPTION as a raw control character — splitting a line in a format
+  // defined in terms of CRLF-delimited lines.
+  it("escapes a bare CR in guest notes", () => {
+    const document = buildIcs({
+      ...base,
+      description: "before" + CR + "after",
+    });
+
+    expect(document).not.toContain("before" + CR + "after");
+    expect(descriptionLines(document)).toHaveLength(1);
+    expect(descriptionLines(document)[0]).toContain("before\\nafter");
+  });
+
+  it("still escapes CRLF and a bare LF", () => {
+    const crlf = buildIcs({ ...base, description: "a" + CR + LF + "b" });
+    const lf = buildIcs({ ...base, description: "a" + LF + "b" });
+
+    // One \n escape for CRLF, not two: the pair is one line break.
+    expect(descriptionLines(crlf)[0]).toBe("DESCRIPTION:a\\nb");
+    expect(descriptionLines(lf)[0]).toBe("DESCRIPTION:a\\nb");
+  });
+
+  // The whole document must carry no control characters other than the CRLFs
+  // that delimit its own lines.
+  it("leaves no stray control character anywhere in the document", () => {
+    const document = buildIcs({
+      ...base,
+      description: "x" + CR + "y",
+      location: "z" + CR + "w",
+    });
+
+    expect(document.split(CR + LF).join("")).not.toContain(CR);
+  });
+});
