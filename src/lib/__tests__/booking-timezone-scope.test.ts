@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { generateDaySlots } from "@/lib/availability";
 import { createBooking } from "@/lib/bookings";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import {
+  createServiceRoleClient,
+  createTenantScopedClient,
+} from "@/lib/supabase/server";
 import { getTenantTimeZone } from "@/lib/tenants";
 import type { CreateBookingInput } from "@/lib/types";
 
@@ -47,6 +50,7 @@ import type { CreateBookingInput } from "@/lib/types";
 
 vi.mock("@/lib/supabase/server", () => ({
   createServiceRoleClient: vi.fn(),
+  createTenantScopedClient: vi.fn(),
 }));
 
 vi.mock("@/lib/availability", () => ({
@@ -205,6 +209,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   db = new FakeDatabase();
   vi.mocked(createServiceRoleClient).mockReturnValue(fakeClient(db));
+  vi.mocked(createTenantScopedClient).mockReturnValue(fakeClient(db));
   // The chosen slot is open, so the pre-check passes and the flow completes.
   vi.mocked(generateDaySlots).mockReturnValue([{ start: SLOT.start, end: SLOT.end }]);
 });

@@ -8,7 +8,7 @@ import {
   type EmailProvider,
 } from "@/lib/email/provider";
 import { buildIcs, icsFilename, icsUid } from "@/lib/ics";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import { createTenantScopedClient } from "@/lib/supabase/server";
 import { getTenantById } from "@/lib/tenants";
 import type { Booking, GuestDetails, Tenant } from "@/lib/types";
 
@@ -139,14 +139,15 @@ function logSendFailure(
 /**
  * The addresses that manage this tenant.
  *
- * Scoped by `customer_id` in app code as well as by the query's own key — the
- * mandated second layer. `role in ('owner','admin')` excludes `staff`, who are
+ * Read through the tenant-scoped client, so the `tenant_members` policies —
+ * not this query alone — decide what comes back; the `.eq("customer_id", …)`
+ * stays as the second layer (ALI-116). `role in ('owner','admin')` excludes `staff`, who are
  * members of the tenant but not the party a booking notification is for.
  */
 export async function resolveTenantRecipients(
   customerId: string,
 ): Promise<string[]> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { data, error } = await supabase
     .from("tenant_members")
     .select("email")

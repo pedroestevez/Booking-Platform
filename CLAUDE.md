@@ -51,14 +51,32 @@ per-tenant fork.
   (migration `0004`) — `auth_subject` (Clerk user id) → `customer_id`.
 - **The booking flow itself has no end-user auth.** Guests are identified by
   email through `end_customers` (see data model below), not by signing in.
-- Auth is **decoupled from Row Level Security**. The app never passes an
-  end-user JWT to PostgREST. RLS is driven entirely server-side: trusted
-  server code resolves the current tenant, sets the `app.current_customer_id`
-  context GUC for the transaction, and the service-role client (which
-  bypasses RLS by design) does the actual reads/writes, filtered by
-  `customer_id` in application code as well. RLS is defense in depth on top
-  of the app's own scoping, not the sole gate on it — but it is never
-  optional; see below.
+- Auth is **decoupled from Row Level Security**, and still is. The app never
+  passes an *end-user* JWT to PostgREST — Clerk's token never reaches the
+  database. What it does pass is a token the **server** mints for itself.
+
+  ~~RLS is driven entirely server-side: trusted server code resolves the
+  current tenant, sets the `app.current_customer_id` context GUC for the
+  transaction, and the service-role client (which bypasses RLS by design) does
+  the actual reads/writes.~~ **Superseded 2026-08-22 by ALI-138 / ALI-116, and
+  the reason is physics rather than preference:** `set_config(…, true)` is
+  transaction-local and every PostgREST call is its own transaction, so the GUC
+  died before the query it was meant to scope; the session-scoped alternative
+  leaks to the next request on a pooled connection. The policies were live and
+  **inert** for as long as that design stood.
+
+  The mechanism now: trusted server code resolves the tenant (from the URL
+  slug, the request host, or a Clerk `auth_subject` → `tenant_members` lookup),
+  signs that `customer_id` into a short-lived HS256 token with
+  `SUPABASE_JWT_SECRET`, and `createTenantScopedClient(customerId)` sends it.
+  `app.current_customer_id()` reads the claim (migration `0009`), so all 28
+  policies engage. The GUC leg is kept and still takes precedence — it is what
+  the direct-`pg` test harness drives. Queries still filter by `customer_id` in
+  app code; that filter is now the second layer rather than the only one.
+- **`customer_id` is a credential now, not just a filter argument.** It is
+  signed into a token the database trusts completely, so a browser-supplied
+  value would not merely bypass RLS, it would weaponize it. It comes from the
+  server's own resolution or nowhere (ALI-139).
 
 ## Data model (Supabase / Postgres)
 
@@ -95,9 +113,22 @@ history follows them across bookings within a tenant.
 - **Also filter by `customer_id` in application code** — defense in depth and
   clear intent, on top of (not instead of) RLS.
 - **The service-role key is server-only**, never sent to the browser or
-  imported into a Client Component. It bypasses RLS to do the one lookup that
-  can't yet be tenant-scoped (the slug → tenant lookup), after which the
-  request context is set and further access is policy-enforced.
+  imported into a Client Component. It bypasses RLS, so it is reserved for the
+  bootstrap lookups that *produce* a tenant id and therefore cannot be scoped
+  by one. **The allow-list is a comment block in `src/lib/supabase/server.ts`
+  and it is the whole list** — anything else reaching for that client is a
+  finding to escalate, not a judgement call to make inline.
+- **A `security definer` function is a third category the invariant does not
+  cover.** `public.resolve_or_create_end_customer` is owned by a role carrying
+  BYPASSRLS, so its body ignores policies whichever client calls it, and a
+  tenant-scoped token is not a scope on it. Audit these separately; never add
+  one without writing down why it must ignore RLS.
+- **Never assert isolation on a connection that can bypass RLS.** `FORCE` row
+  level security closes the table-*owner* exemption and nothing else: a
+  SUPERUSER ignores policies, and so does any role with BYPASSRLS — which the
+  hosted project's `postgres` has. Every DB isolation test calls
+  `becomeRequestRole()` and `assertNotBypassingRls()` first, and proves the
+  *reader* resolves the claim before reading anything into a zero-row result.
 
 ## Testing conventions
 

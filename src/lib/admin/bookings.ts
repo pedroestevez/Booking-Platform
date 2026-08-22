@@ -1,6 +1,6 @@
 import "server-only";
 
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import { createTenantScopedClient } from "@/lib/supabase/server";
 import type { BookingStatus } from "@/lib/types";
 
 /**
@@ -64,7 +64,7 @@ function mapAdminBooking(row: AdminBookingRow): AdminBooking {
 export async function getAdminBookings(
   customerId: string,
 ): Promise<AdminBooking[]> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { data, error } = await supabase
     .from("bookings")
     .select(
@@ -94,7 +94,7 @@ export interface AdminOverview {
 export async function getAdminOverview(
   customerId: string,
 ): Promise<AdminOverview> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const now = new Date();
   const nowIso = now.toISOString();
   const endOfToday = new Date(
@@ -162,7 +162,7 @@ export async function updateBookingStatus(
   if (!ALLOWED_STATUSES.includes(status)) {
     throw new Error(`Invalid booking status: ${status}`);
   }
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { error } = await supabase
     .from("bookings")
     .update({ status })

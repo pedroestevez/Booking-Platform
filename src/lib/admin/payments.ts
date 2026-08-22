@@ -1,6 +1,6 @@
 import "server-only";
 
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import { createTenantScopedClient } from "@/lib/supabase/server";
 import { getStripe } from "@/lib/stripe/server";
 
 /**
@@ -29,7 +29,7 @@ interface PaymentSettingsRow {
 export async function getPaymentSettings(
   customerId: string,
 ): Promise<PaymentSettings> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { data, error } = await supabase
     .from("customers")
     .select("stripe_account_id, stripe_charges_enabled, platform_fee_bps")
@@ -48,7 +48,7 @@ async function patchCustomer(
   customerId: string,
   patch: Partial<PaymentSettingsRow>,
 ): Promise<void> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { error } = await supabase
     .from("customers")
     .update(patch)

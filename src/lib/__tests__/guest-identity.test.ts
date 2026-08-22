@@ -9,7 +9,10 @@ import {
   diffGuestSupplied,
   withGuestSupplied,
 } from "@/lib/bookings";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import {
+  createServiceRoleClient,
+  createTenantScopedClient,
+} from "@/lib/supabase/server";
 import {
   IDENTITY_CONFLICT_CASES,
   fakeResolveOrCreateEndCustomer,
@@ -41,6 +44,7 @@ import type { CreateBookingRequest } from "@/lib/types";
 
 vi.mock("@/lib/supabase/server", () => ({
   createServiceRoleClient: vi.fn(),
+  createTenantScopedClient: vi.fn(),
 }));
 
 vi.mock("@/lib/availability", () => ({
@@ -244,6 +248,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   db = new FakeDatabase();
   vi.mocked(createServiceRoleClient).mockReturnValue(fakeSupabase(db));
+  vi.mocked(createTenantScopedClient).mockReturnValue(fakeSupabase(db));
   vi.mocked(generateDaySlots).mockReturnValue([
     { start: SLOT.start, end: SLOT.end },
   ]);
@@ -502,6 +507,9 @@ describe("ALI-167 — the admin dashboard shows the stored identity (AC7)", () =
         ),
     };
     vi.mocked(createServiceRoleClient).mockReturnValue(
+      { from: () => builder } as unknown as SupabaseClient,
+    );
+    vi.mocked(createTenantScopedClient).mockReturnValue(
       { from: () => builder } as unknown as SupabaseClient,
     );
     return { selects };

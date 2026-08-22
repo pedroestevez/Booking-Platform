@@ -6,7 +6,7 @@ import {
   redactSensitive,
   sendBookingConfirmation,
 } from "@/lib/email/booking-confirmation";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import { createTenantScopedClient } from "@/lib/supabase/server";
 import {
   mapBooking,
   type BookingRow,
@@ -148,14 +148,23 @@ export function initialBookingStatus(priceCents: number): BookingStatus {
  *
  * ## `input.customerId` must already be server-resolved (ALI-139)
  *
- * Every query below runs through `createServiceRoleClient()`, which bypasses
- * RLS, and each is scoped only by the `customerId` it is handed — the services
- * lookup, the three availability reads, the identity RPC, and the insert. That
- * makes this parameter the sole tenant boundary for six statements, so it must
- * come from `getTenantBySlug` (public flow) or a `tenant_members` lookup
- * (admin), and never from a request payload. `createBookingAction` is where
- * that resolution happens for the guest flow; the app-code `customer_id`
- * filters here are the mandated second layer, not the first.
+ * Every query below runs through `createTenantScopedClient(customerId)`, which
+ * signs that id into the `customer_id` claim the RLS policies read (ALI-116).
+ * That *raises* the stakes on this parameter rather than lowering them: it is
+ * no longer merely the app-code filter's argument, it is the tenant identity
+ * the database itself now trusts. It must come from `getTenantBySlug` (public
+ * flow) or a `tenant_members` lookup (admin), and never from a request payload
+ * — `createBookingAction` is where that resolution happens for the guest flow.
+ * The app-code `customer_id` filters here stay as the second layer.
+ *
+ * **One statement below still bypasses RLS and it is not this client's doing:**
+ * `resolve_or_create_end_customer` is `security definer` and owned by a role
+ * carrying BYPASSRLS on hosted Supabase [verified 2026-08-22 against project
+ * xwzxigvgiqsarzfpjqkk: `prosecdef = true`, owner `postgres`,
+ * `rolbypassrls = true`], so its body runs unfiltered whatever client calls it.
+ * It is safe today only because `p_customer_id` is server-resolved here. That
+ * makes it a third category the ALI-116 invariant does not name — raised on the
+ * issue rather than decided inline.
  *
  * Two layers guard the slot, and they are not interchangeable (ALI-98):
  *
@@ -173,7 +182,7 @@ export async function createBooking(
   input: CreateBookingInput,
 ): Promise<Booking> {
   const { customerId, serviceId, slot, guest, customFields = {} } = input;
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
 
   // Fetch the service (scoped to the tenant) for its duration.
   const { data: service, error: serviceError } = await supabase

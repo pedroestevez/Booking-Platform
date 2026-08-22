@@ -14,6 +14,8 @@ services + availability and writes bookings through this database (the old
 | `migrations/0004_tenant_members.sql` | Maps a signed-in admin (Clerk `auth_subject`) to the tenant(s) they manage. |
 | `migrations/0005_stripe_connect.sql` | Per-tenant Stripe Connect (Express) account columns on `customers`. |
 | `migrations/0007_guest_identity_no_overwrite.sql` | Makes an existing `end_customers` row immutable to the anonymous booking path: `resolve_or_create_end_customer()` now resolves-or-creates and never updates, so a second booker who types a known email can no longer overwrite that guest's stored `name`/`phone` (which, because bookings reference `end_customer_id`, rewrote the guest name on their past bookings too). What the request supplied is recorded on the booking instead, under the reserved server-authoritative `custom_fields.guest_supplied` key. Closes ALI-167. |
+| `migrations/0008_custom_domain.sql` | Per-tenant `custom_domain` on `customers`, so a tenant can be addressed at its own host instead of `/<slug>` (ALI-211). |
+| `migrations/0009_tenant_identity_from_jwt_claim.sql` | Redefines `app.current_customer_id()` to fall back to the `customer_id` JWT claim, which switches all 28 policies at once — they all already called it. Implements the ALI-138 mechanism decision and is what makes RLS engage on the request path (ALI-116). **Recorded in the remote migration history under the name `0007_tenant_identity_from_jwt_claim`**, which collided with `0007_guest_identity_no_overwrite` in this tree; the file is `0009` so filename order stays unambiguous. |
 | `seed.sql` | Two demo tenants + their services/availability, for local dev and demos. |
 
 ## Applying
@@ -26,6 +28,38 @@ supabase db reset       # runs migrations/ then seed.sql
 ```
 
 Against a hosted project: `supabase db push`.
+
+## What the hermetic database has to fake (ALI-116)
+
+`scripts/apply-migrations.mjs` bootstraps two things a hosted Supabase project
+provides and a bare `postgres:16` does not. Both are arrangement, not schema —
+no migration is allowed to depend on them existing in production, because in
+production they already do.
+
+1. **`auth.jwt()`.** Migration `0009` reads the tenant from
+   `auth.jwt() ->> 'customer_id'`, and Postgres validates a `language sql` body
+   at CREATE time — so without an `auth.jwt()` to resolve, `0009` cannot apply
+   at all. The shim is Supabase's own definition (it reads the
+   `request.jwt.claims` GUC that PostgREST populates from the verified bearer
+   token), which is what lets a DB test drive the **production** reader rather
+   than a test-only one.
+2. **Supabase's default grants.** On a hosted project every table in `public`
+   is granted to `anon`/`authenticated`/`service_role` automatically [verified
+   2026-08-22 against project `xwzxigvgiqsarzfpjqkk`: all seven tenant-scoped
+   tables carry full DML for all three]. The migration tree grants almost none
+   of it explicitly, so a hermetic database otherwise ends up with roles that
+   exist and can touch nothing — and `set role authenticated; select … from
+   bookings` fails `42501 permission denied` instead of returning
+   policy-filtered rows. A test that catches that error passes for the wrong
+   reason.
+
+**RLS tests must not run on the connection's default role.** `FORCE` row level
+security closes the *table owner* exemption and nothing else: a `SUPERUSER`
+bypasses policies unconditionally, and so does any role with `BYPASSRLS`. CI
+connects as the container's `postgres` superuser, and the hosted project's
+`postgres` carries `BYPASSRLS`. Use `becomeRequestRole()` and
+`assertNotBypassingRls()` from `src/test/supabase-harness.ts`; the second one
+fails the test loudly rather than letting the suite go vacuously green.
 
 ## Hermetic test database (ALI-114)
 

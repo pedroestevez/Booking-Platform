@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { generateDaySlots } from "@/lib/availability";
 import { createBooking, initialBookingStatus } from "@/lib/bookings";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import {
+  createServiceRoleClient,
+  createTenantScopedClient,
+} from "@/lib/supabase/server";
 import { formatPrice, formatServicePrice, FREE_PRICE_LABEL } from "@/lib/utils";
 import type { CreateBookingInput } from "@/lib/types";
 
@@ -32,6 +35,7 @@ import type { CreateBookingInput } from "@/lib/types";
 
 vi.mock("@/lib/supabase/server", () => ({
   createServiceRoleClient: vi.fn(),
+  createTenantScopedClient: vi.fn(),
 }));
 
 vi.mock("@/lib/tenants", () => ({
@@ -137,6 +141,9 @@ async function bookServicePriced(priceCents: number): Promise<InsertedRow> {
   } as unknown as SupabaseClient;
 
   vi.mocked(createServiceRoleClient).mockReturnValue(client);
+  vi.mocked(createTenantScopedClient).mockReturnValue(client);
+
+  vi.mocked(createTenantScopedClient).mockReturnValue(client);
   // The chosen slot is open, so the pre-check passes and the insert is reached.
   vi.mocked(generateDaySlots).mockReturnValue([{ start: SLOT.start, end: SLOT.end }]);
 
