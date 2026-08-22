@@ -15,7 +15,10 @@ import {
   createResendProvider,
   getEmailProvider,
 } from "@/lib/email/provider";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import {
+  createServiceRoleClient,
+  createTenantScopedClient,
+} from "@/lib/supabase/server";
 import {
   fakeResolveOrCreateEndCustomer,
   type FakeEndCustomerRow,
@@ -39,6 +42,7 @@ import type { Booking, CreateBookingInput } from "@/lib/types";
 
 vi.mock("@/lib/supabase/server", () => ({
   createServiceRoleClient: vi.fn(),
+  createTenantScopedClient: vi.fn(),
 }));
 
 vi.mock("@/lib/availability", () => ({
@@ -267,6 +271,9 @@ beforeEach(() => {
   resend = new FakeResend();
 
   vi.mocked(createServiceRoleClient).mockReturnValue(fakeSupabase(db));
+  vi.mocked(createTenantScopedClient).mockReturnValue(fakeSupabase(db));
+
+  vi.mocked(createTenantScopedClient).mockReturnValue(fakeSupabase(db));
   vi.mocked(generateDaySlots).mockReturnValue([
     { start: SLOT.start, end: SLOT.end },
   ]);

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import { createTenantScopedClient } from "@/lib/supabase/server";
 import {
   mapBlockedSlot,
   mapService,
@@ -22,7 +22,7 @@ import type { AvailabilityRule, BlockedSlot, Service } from "@/lib/types";
 
 /** All services for a tenant, including inactive ones (the public side hides those). */
 export async function listServices(customerId: string): Promise<Service[]> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { data, error } = await supabase
     .from("services")
     .select("id, customer_id, name, description, duration_minutes, price_cents, active")
@@ -45,7 +45,7 @@ export async function createService(
   customerId: string,
   input: ServiceInput,
 ): Promise<void> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { error } = await supabase.from("services").insert({
     customer_id: customerId,
     name: input.name,
@@ -62,7 +62,7 @@ export async function updateService(
   id: string,
   input: ServiceInput,
 ): Promise<void> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { error } = await supabase
     .from("services")
     .update({
@@ -82,7 +82,7 @@ export async function setServiceActive(
   id: string,
   active: boolean,
 ): Promise<void> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { error } = await supabase
     .from("services")
     .update({ active })
@@ -113,7 +113,7 @@ export async function createAvailabilityRule(
   customerId: string,
   input: AvailabilityRuleInput,
 ): Promise<void> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { error } = await supabase.from("availability_rules").insert({
     customer_id: customerId,
     day_of_week: input.dayOfWeek,
@@ -128,7 +128,7 @@ export async function deleteAvailabilityRule(
   customerId: string,
   id: string,
 ): Promise<void> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { error } = await supabase
     .from("availability_rules")
     .delete()
@@ -143,7 +143,7 @@ export async function deleteAvailabilityRule(
 export async function listBlockedSlots(
   customerId: string,
 ): Promise<BlockedSlot[]> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { data, error } = await supabase
     .from("blocked_slots")
     .select("id, customer_id, start_time, end_time, reason")
@@ -167,7 +167,7 @@ export async function createBlockedSlot(
   customerId: string,
   input: BlockedSlotInput,
 ): Promise<void> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { error } = await supabase.from("blocked_slots").insert({
     customer_id: customerId,
     start_time: input.start,
@@ -181,7 +181,7 @@ export async function deleteBlockedSlot(
   customerId: string,
   id: string,
 ): Promise<void> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { error } = await supabase
     .from("blocked_slots")
     .delete()

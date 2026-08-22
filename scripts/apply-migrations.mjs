@@ -57,6 +57,81 @@ async function bootstrapSupabaseRoles(client) {
   );
 }
 
+/**
+ * The `auth` surface a hosted Supabase project provides and a bare
+ * `postgres:16` does not (ALI-116).
+ *
+ * Migration 0009 redefines `app.current_customer_id()` to fall back to
+ * `auth.jwt() ->> 'customer_id'`. Postgres validates a `language sql` body at
+ * CREATE time, so without an `auth.jwt()` to resolve, 0009 fails to apply and
+ * the whole hermetic run dies on `schema "auth" does not exist`.
+ *
+ * This is the same definition Supabase ships: PostgREST puts the verified JWT
+ * payload in the `request.jwt.claims` GUC before running the request's
+ * transaction, and `auth.jwt()` reads it. Recreating it here is what lets a DB
+ * test drive the *production* reader — set `request.jwt.claims` and the
+ * policies resolve the tenant exactly the way a real request does. Without it
+ * the suite could only ever exercise the GUC leg, which is not the leg the app
+ * uses.
+ *
+ * `request.jwt.claim` (singular) is the pre-PostgREST-9 spelling and is kept
+ * for the same reason Supabase keeps it: some deployments still emit it.
+ */
+async function bootstrapAuthJwt(client) {
+  await client.query("create schema if not exists auth;");
+  await client.query(
+    `create or replace function auth.jwt()
+     returns jsonb
+     language sql
+     stable
+     as $fn$
+       select coalesce(
+         nullif(current_setting('request.jwt.claim', true), ''),
+         nullif(current_setting('request.jwt.claims', true), '')
+       )::jsonb;
+     $fn$;`,
+  );
+  await client.query(
+    "grant usage on schema auth to anon, authenticated, service_role;",
+  );
+  await client.query(
+    "grant execute on function auth.jwt() to anon, authenticated, service_role;",
+  );
+  console.log("apply-migrations: ensured auth.jwt() exists (Supabase-equivalent shim).");
+}
+
+/**
+ * Supabase's default privileges, which a vanilla Postgres does not have.
+ *
+ * On a hosted project every table and function created in `public` is granted
+ * to `anon`/`authenticated`/`service_role` automatically — verified 2026-08-22
+ * against project `xwzxigvgiqsarzfpjqkk`: all seven tenant-scoped tables carry
+ * full DML for all three roles, and `resolve_or_create_end_customer` carries
+ * EXECUTE for all three despite `0003` granting it only to `service_role`.
+ * Without this, a hermetic database ends up with roles that exist and can touch
+ * nothing, so `set role authenticated; select … from bookings` fails `42501
+ * permission denied` instead of returning policy-filtered rows — and a test
+ * that catches that error passes for the wrong reason (ALI-116, finding 2).
+ *
+ * Applied as `alter default privileges` **before** the migrations rather than
+ * as a `grant` sweep after them, because that is how the real thing behaves:
+ * privileges attach at CREATE time, so a migration that deliberately `revoke`s
+ * one afterwards keeps its revocation instead of having it silently restored.
+ * A post-hoc sweep would paper over exactly the drift this is here to expose.
+ */
+async function grantSupabaseDefaults(client) {
+  const roles = SUPABASE_MANAGED_ROLES.join(", ");
+  await client.query(`grant usage on schema public to ${roles};`);
+  for (const kind of ["tables", "sequences", "functions"]) {
+    await client.query(
+      `alter default privileges in schema public grant all on ${kind} to ${roles};`,
+    );
+  }
+  console.log(
+    `apply-migrations: applied Supabase's default public-schema privileges (${roles}).`,
+  );
+}
+
 async function main() {
   const databaseUrl = process.env.TEST_DATABASE_URL;
   if (!databaseUrl) {
@@ -83,8 +158,10 @@ async function main() {
   try {
     try {
       await bootstrapSupabaseRoles(client);
+      await bootstrapAuthJwt(client);
+      await grantSupabaseDefaults(client);
     } catch (err) {
-      console.error("apply-migrations: FAILED bootstrapping Supabase-managed roles");
+      console.error("apply-migrations: FAILED bootstrapping the Supabase-managed surface");
       console.error(err instanceof Error ? err.message : err);
       process.exitCode = 1;
       return;

@@ -4,7 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { generateDaySlots } from "@/lib/availability";
 import { createBooking } from "@/lib/bookings";
 import { sendBookingConfirmation } from "@/lib/email/booking-confirmation";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import {
+  createServiceRoleClient,
+  createTenantScopedClient,
+} from "@/lib/supabase/server";
 import type { CreateBookingInput } from "@/lib/types";
 
 /**
@@ -29,6 +32,7 @@ import type { CreateBookingInput } from "@/lib/types";
 
 vi.mock("@/lib/supabase/server", () => ({
   createServiceRoleClient: vi.fn(),
+  createTenantScopedClient: vi.fn(),
 }));
 
 vi.mock("@/lib/tenants", () => ({
@@ -115,6 +119,14 @@ function arrange({ priceCents = 0, insertError = null }: Arrangement = {}) {
   };
 
   vi.mocked(createServiceRoleClient).mockReturnValue({
+    from: (table: string) => {
+      if (table === "services") return services;
+      if (table === "end_customers") return endCustomers;
+      return bookings;
+    },
+    rpc: async () => ({ data: END_CUSTOMER_ID, error: null }),
+  } as unknown as SupabaseClient);
+  vi.mocked(createTenantScopedClient).mockReturnValue({
     from: (table: string) => {
       if (table === "services") return services;
       if (table === "end_customers") return endCustomers;

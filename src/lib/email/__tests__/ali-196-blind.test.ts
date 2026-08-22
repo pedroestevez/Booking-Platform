@@ -12,7 +12,10 @@ import {
   sanitizeHeaderValue,
 } from "@/lib/email/provider";
 import { buildIcs } from "@/lib/ics";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import {
+  createServiceRoleClient,
+  createTenantScopedClient,
+} from "@/lib/supabase/server";
 import { getTenantById } from "@/lib/tenants";
 import { FakeResend, RESEND_REJECTIONS } from "@/test/fake-resend";
 import type { Booking, Tenant } from "@/lib/types";
@@ -42,6 +45,7 @@ import type { Booking, Tenant } from "@/lib/types";
 
 vi.mock("@/lib/supabase/server", () => ({
   createServiceRoleClient: vi.fn(),
+  createTenantScopedClient: vi.fn(),
 }));
 
 vi.mock("@/lib/tenants", () => ({
@@ -137,6 +141,9 @@ beforeEach(() => {
   tenantMemberEmails = [];
 
   vi.mocked(createServiceRoleClient).mockReturnValue(fakeSupabase());
+  vi.mocked(createTenantScopedClient).mockReturnValue(fakeSupabase());
+
+  vi.mocked(createTenantScopedClient).mockReturnValue(fakeSupabase());
   vi.mocked(getTenantById).mockResolvedValue(tenant());
   vi.mocked(getEmailProvider).mockImplementation(() =>
     createResendProvider(resend, FROM, BOUND_MS),

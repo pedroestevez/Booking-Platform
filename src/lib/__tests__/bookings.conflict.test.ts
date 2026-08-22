@@ -5,7 +5,10 @@ import { createBookingAction } from "@/app/[customerSlug]/actions";
 import { generateDaySlots } from "@/lib/availability";
 import { createBooking } from "@/lib/bookings";
 import { genericFailureMessage } from "@/lib/errors";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import {
+  createServiceRoleClient,
+  createTenantScopedClient,
+} from "@/lib/supabase/server";
 import { getTenantBySlug } from "@/lib/tenants";
 import type {
   CreateBookingInput,
@@ -67,6 +70,7 @@ import type {
 
 vi.mock("@/lib/supabase/server", () => ({
   createServiceRoleClient: vi.fn(),
+  createTenantScopedClient: vi.fn(),
 }));
 
 vi.mock("@/lib/tenants", () => ({
@@ -218,6 +222,9 @@ function arrangeInsertFailure(error: PostgrestError): void {
   vi.mocked(createServiceRoleClient).mockReturnValue(
     stubSupabase({ data: null, error }),
   );
+  vi.mocked(createTenantScopedClient).mockReturnValue(
+    stubSupabase({ data: null, error }),
+  );
 }
 
 /**
@@ -232,6 +239,9 @@ function arrangeIdentityFailure(error: PostgrestError): void {
   vi.mocked(createServiceRoleClient).mockReturnValue(
     stubSupabase({ data: null, error: null }, { data: null, error }),
   );
+  vi.mocked(createTenantScopedClient).mockReturnValue(
+    stubSupabase({ data: null, error: null }, { data: null, error }),
+  );
 }
 
 /**
@@ -244,6 +254,9 @@ function arrangeIdentityFailure(error: PostgrestError): void {
 function arrangeClientFailure(error: Error): void {
   arrangeTenantAndSlot();
   vi.mocked(createServiceRoleClient).mockImplementation(() => {
+    throw error;
+  });
+  vi.mocked(createTenantScopedClient).mockImplementation(() => {
     throw error;
   });
 }
@@ -286,11 +299,35 @@ const raisedIdentityException = () =>
     code: "40001",
   });
 
-/** `createServiceRoleClient`'s own message, verbatim from `src/lib/supabase/server.ts`. */
+/**
+ * `createTenantScopedClient`'s own message, verbatim from
+ * `src/lib/supabase/server.ts`.
+ *
+ * It names the **anon** key, not the service-role key: since ALI-116 the
+ * booking path builds a tenant-scoped client, so that is the misconfiguration a
+ * guest can actually hit. Keeping the old service-role wording here would have
+ * left the fixture asserting a message production can no longer produce.
+ */
 const misconfiguration = () =>
   new Error(
     "Supabase is not configured: set NEXT_PUBLIC_SUPABASE_URL and " +
-      "SUPABASE_SERVICE_ROLE_KEY in the environment (see .env.example).",
+      "NEXT_PUBLIC_SUPABASE_ANON_KEY in the environment (see .env.example).",
+  );
+
+/**
+ * The other way the tenant-scoped client refuses to build: the signing secret
+ * is absent, so there is no `customer_id` claim to put in front of RLS.
+ *
+ * There is deliberately no fallback to the service-role client here — that
+ * would leave RLS inert while every test stayed green — so this is a hard
+ * failure, and it must map to the same generic guest-facing message as any
+ * other misconfiguration rather than leaking the variable's name.
+ */
+const missingJwtSecret = () =>
+  new Error(
+    "SUPABASE_JWT_SECRET is not set. Tenant-scoped queries sign a " +
+      "customer_id claim with it, and the RLS policies read that claim; " +
+      "without it there is no safe client to fall back to (see .env.example).",
   );
 
 const UUID_PATTERN =
@@ -499,8 +536,29 @@ describe("createBookingAction — an unexpected failure is generic and logged on
     // answer an anonymous visitor with the names of the variables to attack.
     const shown = result.error.replace(reference, "<reference>");
     expect(shown).not.toContain("NEXT_PUBLIC_SUPABASE_URL");
-    expect(shown).not.toContain("SUPABASE_SERVICE_ROLE_KEY");
+    expect(shown).not.toContain("NEXT_PUBLIC_SUPABASE_ANON_KEY");
     expect(shown).not.toContain("Supabase");
+    expect(shown).not.toContain(".env");
+  });
+
+  it("does not leak SUPABASE_JWT_SECRET when the tenant claim cannot be signed", async () => {
+    // ALI-116's new deployment failure mode. The tenant-scoped client refuses
+    // to build rather than falling back to the RLS-bypassing one, so a missing
+    // signing secret reaches the guest as an error — and naming the secret in
+    // it would tell an anonymous visitor exactly which variable is unset.
+    const secretError = missingJwtSecret();
+    arrangeClientFailure(secretError);
+
+    const result = await createBookingAction(REQUEST);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+
+    const reference = expectSanitised(result.error, secretError);
+
+    const shown = result.error.replace(reference, "<reference>");
+    expect(shown).not.toContain("SUPABASE_JWT_SECRET");
+    expect(shown).not.toContain("customer_id");
     expect(shown).not.toContain(".env");
   });
 
@@ -512,6 +570,9 @@ describe("createBookingAction — an unexpected failure is generic and logged on
     // ALI-98 property a blanket sanitiser would have destroyed.
     arrangeTenantAndSlot();
     vi.mocked(createServiceRoleClient).mockReturnValue(
+      stubSupabase({ data: null, error: null }),
+    );
+    vi.mocked(createTenantScopedClient).mockReturnValue(
       stubSupabase({ data: null, error: null }),
     );
     // Overrides the open slot arranged above: nothing is free, so the pre-check

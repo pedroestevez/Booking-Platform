@@ -2,7 +2,10 @@ import "server-only";
 
 import { cache } from "react";
 
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import {
+  createServiceRoleClient,
+  createTenantScopedClient,
+} from "@/lib/supabase/server";
 import {
   mapAvailabilityRule,
   mapBlockedSlot,
@@ -26,12 +29,18 @@ import type {
 /**
  * Tenant data-access layer.
  *
- * The single chokepoint for tenant-scoped reads. Every query goes through the
- * server-only service-role client (`createServiceRoleClient`) and *always*
- * filters by `customer_id` — the mandated defense-in-depth filter. Resolving the
- * tenant by slug is the one lookup that isn't yet customer-scoped (it produces
- * the id everything else is scoped by). Keeping this behind `server-only`
- * guarantees tenant resolution never ships to the browser.
+ * The single chokepoint for tenant-scoped reads. Every query that already knows
+ * its tenant goes through `createTenantScopedClient(customerId)`, so the RLS
+ * policies — not this file — are what refuse another tenant's rows (ALI-116).
+ * Every one *also* keeps its `.eq("customer_id", …)`: that filter is now the
+ * second layer rather than the only one, and it still states intent and catches
+ * a mis-scoped client at the app layer before the database has to.
+ *
+ * Three reads here cannot be scoped, because they are what *produces* the
+ * tenant id — `getTenantBySlug`, `getTenantByHost`, and the cross-tenant
+ * `getAllTenants`. They are on the allow-list in `@/lib/supabase/server` and
+ * nothing else in this file may join them. Keeping the module behind
+ * `server-only` guarantees tenant resolution never ships to the browser.
  */
 
 export async function getTenantBySlug(slug: string): Promise<Tenant | null> {
@@ -78,7 +87,7 @@ export const getTenantByHost = cache(async function getTenantByHost(
 
 /** Resolve a tenant by its id (used by the admin layer after a membership lookup). */
 export async function getTenantById(customerId: string): Promise<Tenant | null> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { data, error } = await supabase
     .from("customers")
     .select("id, name, slug, branding_json, custom_domain")
@@ -111,7 +120,7 @@ export async function getTenantById(customerId: string): Promise<Tenant | null> 
  * would hide it.
  */
 export async function getTenantTimeZone(customerId: string): Promise<string> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { data, error } = await supabase
     .from("customers")
     .select("id, name, slug, branding_json, custom_domain")
@@ -124,7 +133,7 @@ export async function getTenantTimeZone(customerId: string): Promise<string> {
 }
 
 export async function getActiveServices(customerId: string): Promise<Service[]> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { data, error } = await supabase
     .from("services")
     .select("id, customer_id, name, description, duration_minutes, price_cents, active")
@@ -140,7 +149,7 @@ export async function getActiveServices(customerId: string): Promise<Service[]> 
 export async function getAvailabilityRules(
   customerId: string,
 ): Promise<AvailabilityRule[]> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { data, error } = await supabase
     .from("availability_rules")
     .select("id, customer_id, day_of_week, start_time, end_time, buffer_minutes")
@@ -154,7 +163,7 @@ export async function getAvailabilityRules(
 export async function getBlockedSlots(
   customerId: string,
 ): Promise<BlockedSlot[]> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { data, error } = await supabase
     .from("blocked_slots")
     .select("id, customer_id, start_time, end_time, reason")
@@ -198,7 +207,7 @@ export const SLOT_FREEING_STATUS = "cancelled";
 export async function getUpcomingBookings(
   customerId: string,
 ): Promise<Booking[]> {
-  const supabase = createServiceRoleClient();
+  const supabase = createTenantScopedClient(customerId);
   const { data, error } = await supabase
     .from("bookings")
     .select(

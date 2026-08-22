@@ -585,10 +585,28 @@ describe.skipIf(!hasTestDatabase)("migration 0007 — hygiene", () => {
 
       const [facts] = await routineFacts(db);
       expect(facts!.public_execute).toBe(true);
-      // …and the literal `=`-item check reports the hole as absent, which is
+      expect(facts!.anon_execute).toBe(true);
+
+      // ~~…and the literal `=`-item check reports the hole as absent, which is
       // exactly why the privilege inquiry above is the load-bearing one.
-      expect(facts!.acl_is_null).toBe(true);
-      expect(facts!.public_acl_items).toBe(0);
+      // `expect(acl_is_null).toBe(true)`, `expect(public_acl_items).toBe(0)`.~~
+      //
+      // **Corrected 2026-08-22 (ALI-116).** That held on a database with no
+      // default privileges, which is what this harness used to run against —
+      // not what Supabase is. Once `apply-migrations.mjs` reproduces Supabase's
+      // `alter default privileges`, a freshly created function materializes its
+      // whole ACL instead of leaving it NULL: `=X/postgres | postgres=X |
+      // anon=X | authenticated=X | service_role=X` [verified 2026-08-22 on a
+      // hermetic postgres:16 with the full migration tree]. So the PUBLIC grant
+      // is now *visible* as an `=` item rather than hidden behind a NULL.
+      //
+      // The conclusion the old assertions were drawn to survives intact and is
+      // the reason they are corrected rather than deleted: **`acl_is_null` and
+      // the `=`-item count are both unreliable narrators**, in opposite
+      // directions on the two database shapes, and `has_function_privilege` is
+      // the check that reports the truth on either.
+      expect(facts!.acl_is_null).toBe(false);
+      expect(facts!.public_acl_items).toBe(1);
     });
   });
 
