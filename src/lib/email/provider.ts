@@ -41,7 +41,9 @@ export class EmailNotConfiguredError extends Error {
 
 /** Thrown when the vendor was reachable-or-not and refused to accept the message. */
 export class EmailSendError extends Error {
-  readonly name = "EmailSendError";
+  // Typed `string` rather than the literal so `EmailTimeoutError` can narrow it
+  // to its own name; nothing branches on the literal type.
+  readonly name: string = "EmailSendError";
 
   constructor(
     message: string,
@@ -51,6 +53,37 @@ export class EmailSendError extends Error {
     readonly vendorCode: string | null,
   ) {
     super(message);
+  }
+}
+
+/**
+ * How long a single vendor call may take before the caller is freed (ALI-196).
+ *
+ * Ten seconds is well past Resend's normal response and well inside any
+ * reasonable patience for someone who has just pressed "Book". The number that
+ * matters is not this one but the fact that *some* finite number applies:
+ * before this, the only ceiling was undici's 300s default, per send.
+ */
+export const DEFAULT_SEND_TIMEOUT_MS = 10_000;
+
+/**
+ * Thrown when a send exceeded its bound (ALI-196 B1).
+ *
+ * An `EmailSendError` subclass on purpose: every existing caller already treats
+ * that as "this send did not happen", which is exactly the right reading, and
+ * the failure logger's shape needs no special case. `vendorCode` is `timeout`
+ * so a timed-out send is distinguishable in the log from a vendor rejection.
+ */
+export class EmailTimeoutError extends EmailSendError {
+  readonly name = "EmailTimeoutError";
+
+  constructor(readonly timeoutMs: number) {
+    super(
+      `Email send exceeded ${timeoutMs}ms and was abandoned. The booking it ` +
+        "refers to is unaffected.",
+      null,
+      "timeout",
+    );
   }
 }
 
@@ -121,6 +154,20 @@ export interface ResendLike {
 }
 
 /**
+ * Control characters removed from any single-line header value (ALI-196).
+ *
+ * `From` was hardened at ALI-69 and `Subject` was not, though both are headers
+ * and both carry tenant-controlled text — the service name and the tenant name
+ * reach `Subject` verbatim. A CR or LF there ends the header and begins one of
+ * the sender's choosing, which is the same injection `formatFrom` exists to
+ * stop, one header over. Applied at the port so it covers every caller rather
+ * than every caller who remembers.
+ */
+export function sanitizeHeaderValue(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+}
+
+/**
  * Everything except an address is stripped from a display name before it is
  * put in a `From` header.
  *
@@ -132,8 +179,7 @@ export interface ResendLike {
  * always quoted — so the worst a hostile name can do is look odd.
  */
 export function formatFrom(displayName: string, address: string): string {
-  const safeName = displayName
-    .replace(/[\u0000-\u001f\u007f]/g, " ")
+  const safeName = sanitizeHeaderValue(displayName)
     .replace(/["\\]/g, "\\$&")
     .trim();
   return safeName ? `"${safeName}" <${address}>` : address;
@@ -150,30 +196,77 @@ export function senderAddress(configured: string): string {
   return (angled ? angled[1]! : configured).trim();
 }
 
+/**
+ * Bound a vendor call in wall-clock time (ALI-196 B1).
+ *
+ * A race and not an `AbortSignal` because there is nothing to signal:
+ * resend@6.20.0 passes no `signal` to `fetch` anywhere in its bundle
+ * [verified: zero occurrences of `signal` in `dist/index.mjs`], so the
+ * in-flight request cannot be cancelled — only abandoned. The socket is left
+ * to the runtime; what this guarantees is that the *caller* is freed on time,
+ * which is the half a guest waiting on a server action can feel.
+ *
+ * The abandoned promise gets a terminal handler before the race, because a
+ * rejection arriving after the race is lost would otherwise be an unhandled
+ * rejection — a fix for a hang that crashes the process instead is not a fix.
+ */
+async function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  operation.catch(() => {});
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new EmailTimeoutError(timeoutMs)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    // Without this the timer holds the event loop open for the full bound on
+    // every successful send, which turns a fast suite into a slow one.
+    clearTimeout(timer);
+  }
+}
+
 /** Build a provider over any Resend-shaped client. The unit under test. */
 export function createResendProvider(
   client: ResendLike,
   fromAddress: string,
+  timeoutMs: number = DEFAULT_SEND_TIMEOUT_MS,
 ): EmailProvider {
   return {
     async send(message) {
       let result: Awaited<ReturnType<ResendLike["emails"]["send"]>>;
       try {
-        result = await client.emails.send({
-          from: formatFrom(message.fromName, fromAddress),
-          to: message.to,
-          subject: message.subject,
-          text: message.text,
-          html: message.html,
-          attachments: message.attachments?.map((a) => ({
-            filename: a.filename,
-            content: a.contentBase64,
-            contentType: a.contentType,
-          })),
-        });
+        result = await withTimeout(
+          client.emails.send({
+            from: formatFrom(message.fromName, fromAddress),
+            to: message.to,
+            subject: sanitizeHeaderValue(message.subject),
+            text: message.text,
+            html: message.html,
+            attachments: message.attachments?.map((a) => ({
+              filename: a.filename,
+              content: a.contentBase64,
+              contentType: a.contentType,
+            })),
+          }),
+          timeoutMs,
+        );
       } catch (cause) {
-        // A transport fault (DNS, TLS, timeout). Normalized into the same
-        // failure channel as a rejection so callers have one thing to catch.
+        // Already in this module's vocabulary, and its own distinct reason.
+        if (cause instanceof EmailTimeoutError) throw cause;
+        // A synchronous throw or a rejected send. The real SDK reaches neither
+        // — its `fetchRequest` catches every fetch rejection and resolves
+        // `application_error` / `statusCode: null` [verified in
+        // resend@6.20.0's bundle] — but the port is defined over `ResendLike`,
+        // not over one vendor build, so the channel stays closed.
         throw new EmailSendError(
           cause instanceof Error ? cause.message : String(cause),
           null,

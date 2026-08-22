@@ -35,6 +35,13 @@ import type {
  * | malformed `to` | 422 `validation_error` | same |
  * | missing `subject` | 422 `missing_required_field` | same |
  * | no `text` and no `html` | 422 `missing_required_field` | same |
+ * | transport failure | resolves `application_error`, null status | same |
+ *
+ * And one thing the vendor does that is not a rejection at all: **it can fail
+ * to answer.** `stallFor`/`delayFor` model that. Every rejection above is
+ * instant, and against an instant-only fake a provider with no timeout is
+ * indistinguishable from one with a timeout — which is exactly how an unbounded
+ * send survived a green suite (ALI-196 B1).
  *
  * Anything accepted is recorded in `sent`, in order, exactly as it was passed —
  * which is what lets a test decode the attachment the vendor would have
@@ -61,6 +68,20 @@ export const RESEND_REJECTIONS = {
     name: "rate_limit_exceeded",
     statusCode: 429,
   },
+  /**
+   * The network failed and the SDK swallowed it.
+   *
+   * Modelled because the port's `catch` around `emails.send()` implies the SDK
+   * throws on a transport fault, and it does not: `fetchRequest` wraps the
+   * whole call and *resolves* `application_error` with a null status
+   * [verified in resend@6.20.0's bundle]. Tests that only ever drove a throwing
+   * client were exercising a branch production cannot reach (ALI-196 rider 6).
+   */
+  transportFailed: {
+    message: "Unable to fetch data. The request could not be resolved.",
+    name: "application_error",
+    statusCode: null,
+  },
 } as const satisfies Record<string, ErrorResponse>;
 
 /**
@@ -74,9 +95,21 @@ export function isDeliverableAddress(address: string): boolean {
   return /^[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;.]+$/.test(address.trim());
 }
 
-/** The bare address out of `Name <a@b.c>` or `a@b.c`. */
+/**
+ * The bare address out of `Name <a@b.c>` or `a@b.c`.
+ *
+ * Quoted display names are removed before the scan, because angle brackets
+ * inside one are part of the name and not the address. `formatFrom` emits
+ * `"Evil <a@evil.com> Co" <bookings@example.test>` for a tenant named
+ * `Evil <a@evil.com> Co`, and taking the first `<...>` read that as a send from
+ * `evil.com` — an unverified domain — so the fake refused, with zero sends, a
+ * message real Resend accepts. A fake that rejects what the vendor allows fails
+ * a test for a bug that does not exist, which costs exactly as much trust as
+ * the opposite (ALI-196 rider 6).
+ */
 function addressOf(value: string): string {
-  const angled = /<([^>]*)>/.exec(value);
+  const unquoted = value.replace(/"(?:\\.|[^"\\])*"/g, "");
+  const angled = /<([^>]*)>/.exec(unquoted);
   return (angled ? angled[1]! : value).trim();
 }
 
@@ -95,6 +128,10 @@ export class FakeResend implements ResendLike {
   private readonly verifiedDomains: string[];
   /** Per-recipient rejections, keyed by lowercased bare address. */
   private readonly rejections = new Map<string, ErrorResponse>();
+  /** Recipients whose send never settles, keyed the same way. */
+  private readonly stalls = new Set<string>();
+  /** Recipients whose send is slow but does answer, in ms. */
+  private readonly delays = new Map<string, number>();
 
   constructor(options: FakeResendOptions = {}) {
     this.apiKey = options.apiKey === undefined ? "re_test_key" : options.apiKey;
@@ -112,6 +149,24 @@ export class FakeResend implements ResendLike {
     this.rejections.set(addressOf(address).toLowerCase(), error);
   }
 
+  /**
+   * Make the send to `address` never settle — the latency clause (ALI-196).
+   *
+   * The gap this closes: every rejection the fake could produce was an
+   * *instant* answer (401, 403, 422, 429). A provider with no timeout looks
+   * identical to one with a timeout when every answer is immediate, so the
+   * whole hang class was invisible to a green suite. This is the input that
+   * tells them apart.
+   */
+  stallFor(address: string): void {
+    this.stalls.add(addressOf(address).toLowerCase());
+  }
+
+  /** Make the send to `address` take `ms` before answering normally. */
+  delayFor(address: string, ms: number): void {
+    this.delays.set(addressOf(address).toLowerCase(), ms);
+  }
+
   /** Every address the vendor accepted a message for. */
   recipients(): string[] {
     return this.sent.map((payload) => addressOf(payload.to));
@@ -121,6 +176,18 @@ export class FakeResend implements ResendLike {
     send: async (
       payload: ResendSendPayload,
     ): Promise<{ data: { id: string } | null; error: ErrorResponse | null }> => {
+      const recipient = addressOf(payload.to ?? "").toLowerCase();
+
+      // Before every validation below, because a request that stalls on the
+      // wire is never answered at all — not answered with a 403.
+      if (this.stalls.has(recipient)) {
+        return new Promise<never>(() => {});
+      }
+      const delay = this.delays.get(recipient);
+      if (delay !== undefined) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+
       if (!this.apiKey) {
         return {
           data: null,

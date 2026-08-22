@@ -3,10 +3,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   EmailNotConfiguredError,
   EmailSendError,
+  EmailTimeoutError,
   createResendProvider,
   formatFrom,
   getEmailProvider,
   isEmailConfigured,
+  sanitizeHeaderValue,
   senderAddress,
   type ResendLike,
 } from "@/lib/email/provider";
@@ -301,5 +303,168 @@ describe("getEmailProvider without a key", () => {
 
     expect(() => getEmailProvider()).toThrow(/RESEND_FROM/);
     expect(isEmailConfigured()).toBe(false);
+  });
+});
+
+// ── ALI-196 ──────────────────────────────────────────────────────────────────
+/**
+ * The port's bound, and the fake's new latency clause (ALI-196 B1).
+ *
+ * The suite above proves the fake refuses what Resend refuses. Every one of
+ * those refusals is *instant*, which is precisely why a green suite said
+ * nothing about an unbounded send: bounded and unbounded are
+ * indistinguishable when every answer arrives immediately.
+ */
+describe("every send is bounded in wall-clock time", () => {
+  const BOUND_MS = 40;
+
+  it("gives up on a vendor that never answers, and says why", async () => {
+    const resend = new FakeResend();
+    resend.stallFor("guest@example.com");
+    const provider = createResendProvider(resend, FROM, BOUND_MS);
+
+    const err = await provider
+      .send({
+        to: "guest@example.com",
+        fromName: "Tenant",
+        subject: "Your booking is confirmed",
+        text: "body",
+        html: "<p>body</p>",
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+
+    expect(err).toBeInstanceOf(EmailTimeoutError);
+    expect(err).toBeInstanceOf(EmailSendError);
+    // Distinguishable in a log from a vendor rejection, which carries a status.
+    expect((err as EmailTimeoutError).vendorCode).toBe("timeout");
+    expect((err as EmailTimeoutError).statusCode).toBeNull();
+  });
+
+  it("lets a send that answers inside the bound succeed untouched", async () => {
+    const resend = new FakeResend();
+    resend.delayFor("guest@example.com", Math.floor(BOUND_MS / 4));
+    const provider = createResendProvider(resend, FROM, BOUND_MS);
+
+    const { id } = await provider.send({
+      to: "guest@example.com",
+      fromName: "Tenant",
+      subject: "Your booking is confirmed",
+      text: "body",
+      html: "<p>body</p>",
+    });
+
+    expect(id).toEqual(expect.any(String));
+    expect(resend.sent).toHaveLength(1);
+  });
+
+  // Two stalled sends started together must cost one bound, not two — the
+  // property that lets the caller run recipients concurrently.
+  it("bounds concurrent sends independently rather than in series", async () => {
+    const resend = new FakeResend();
+    resend.stallFor("one@example.com");
+    resend.stallFor("two@example.com");
+    const provider = createResendProvider(resend, FROM, BOUND_MS);
+
+    const attempt = (to: string) =>
+      provider
+        .send({
+          to,
+          fromName: "Tenant",
+          subject: "s",
+          text: "t",
+          html: "<p>t</p>",
+        })
+        .catch(() => "timed-out");
+
+    const started = Date.now();
+    const results = await Promise.all([
+      attempt("one@example.com"),
+      attempt("two@example.com"),
+    ]);
+    const elapsed = Date.now() - started;
+
+    expect(results).toEqual(["timed-out", "timed-out"]);
+    expect(elapsed).toBeLessThan(BOUND_MS * 2);
+  });
+});
+
+describe("Subject is sanitized the way From already was (ALI-196 rider 3)", () => {
+  const CR = String.fromCharCode(13);
+  const LF = String.fromCharCode(10);
+  const NUL = String.fromCharCode(0);
+
+  it("strips CR, LF and NUL out of a tenant-controlled subject", async () => {
+    const resend = new FakeResend();
+    const provider = createResendProvider(resend, FROM);
+
+    await provider.send({
+      to: "guest@example.com",
+      fromName: "Tenant",
+      subject: "Confirmed" + CR + LF + "Bcc: victim@example.com" + NUL,
+      text: "body",
+      html: "<p>body</p>",
+    });
+
+    const subject = resend.sent[0]!.subject;
+    expect(subject).not.toMatch(new RegExp("[" + CR + LF + NUL + "]"));
+    expect(subject).toContain("Confirmed");
+  });
+
+  it("leaves an ordinary subject alone", () => {
+    expect(sanitizeHeaderValue("Your Interview is confirmed")).toBe(
+      "Your Interview is confirmed",
+    );
+  });
+});
+
+describe("the fake models the vendor's real transport failure (ALI-196 rider 6)", () => {
+  // resend@6.20.0 catches every fetch rejection and *resolves*
+  // `application_error` with a null status. It never throws, so a test that
+  // only drove a throwing client exercised a branch production cannot reach.
+  it("normalizes a swallowed transport failure into EmailSendError", async () => {
+    const resend = new FakeResend();
+    resend.rejectFor("guest@example.com", {
+      ...RESEND_REJECTIONS.transportFailed,
+    });
+    const provider = createResendProvider(resend, FROM);
+
+    const err = await provider
+      .send({
+        to: "guest@example.com",
+        fromName: "Tenant",
+        subject: "s",
+        text: "t",
+        html: "<p>t</p>",
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+
+    expect(err).toBeInstanceOf(EmailSendError);
+    expect((err as EmailSendError).vendorCode).toBe("application_error");
+    expect((err as EmailSendError).statusCode).toBeNull();
+  });
+
+  // A display name containing angle brackets is a *name*, not an address.
+  // The fake used to read the inner address as the sender, refuse the send on
+  // an unverified domain, and report zero sends for a message Resend accepts.
+  it("does not mistake an address inside a quoted display name for the sender", async () => {
+    const resend = new FakeResend({ verifiedDomains: ["example.test"] });
+    const provider = createResendProvider(resend, FROM);
+
+    await provider.send({
+      to: "guest@example.com",
+      fromName: "Evil <attacker@evil.test> Co",
+      subject: "s",
+      text: "t",
+      html: "<p>t</p>",
+    });
+
+    expect(resend.sent).toHaveLength(1);
+    expect(resend.sent[0]!.from).toContain(FROM);
   });
 });

@@ -76,13 +76,22 @@ function toIcsUtc(iso: string): string {
   );
 }
 
-/** Escape per RFC 5545 §3.3.11 (backslash, semicolon, comma, newline). */
+/**
+ * Escape per RFC 5545 §3.3.11 (backslash, semicolon, comma, newline).
+ *
+ * The alternation matches a lone `\r` as well as `\r\n` and `\n`. `/\r?\n/`
+ * could not: it requires the `\n`, so a bare carriage return in guest `notes`
+ * survived into `DESCRIPTION` as a raw control character, splitting the line in
+ * a document that is defined in terms of CRLF-delimited lines (ALI-196
+ * rider 4). Parser-dependent rather than a demonstrated forgery, and wrong
+ * either way.
+ */
 function escapeText(value: string): string {
   return value
     .replace(/\\/g, "\\\\")
     .replace(/;/g, "\\;")
     .replace(/,/g, "\\,")
-    .replace(/\r?\n/g, "\\n");
+    .replace(/\r\n|\r|\n/g, "\\n");
 }
 
 /** Build a single-event VCALENDAR document with CRLF line endings. */

@@ -871,3 +871,157 @@ describe("escapeHtml", () => {
     expect(tenantMessage.html).not.toContain("<b>hi</b>");
   });
 });
+
+// ── ALI-196 ──────────────────────────────────────────────────────────────────
+/**
+ * The hang class (B1), and the two riders that live on this path.
+ *
+ * Every assertion here drives a vendor that answers **slowly or not at all**.
+ * That is the whole point: the ALI-69 suite above is green against an
+ * unbounded provider because every rejection it drives (401/403/422/429) is an
+ * instant answer, and an instant answer looks identical bounded or not. The
+ * stall is the input that tells them apart.
+ */
+describe("ALI-196 — a stuck vendor cannot hold a booking's request open", () => {
+  /** Short enough to keep the suite fast; the number is not the property. */
+  const BOUND_MS = 50;
+  /** Long enough that an unbounded send is unambiguous, short enough to fail fast. */
+  const PATIENCE_MS = 1_500;
+
+  const STILL_HANGING = "STILL-HANGING";
+
+  beforeEach(() => {
+    vi.mocked(getEmailProvider).mockImplementation(() =>
+      createResendProvider(resend, FROM, BOUND_MS),
+    );
+  });
+
+  /** Resolves to `STILL_HANGING` rather than hanging the suite. */
+  async function withPatience<T>(work: Promise<T>): Promise<T | string> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve(STILL_HANGING), PATIENCE_MS);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // The finding, reproduced. Reverting the bound makes this return
+  // STILL-HANGING — the exact probe the ALI-69 audit ran.
+  it("returns the booking even though the guest's send never settles", async () => {
+    resend.stallFor(GUEST.email);
+
+    const outcome = await withPatience(createBooking(input()));
+
+    expect(outcome).not.toBe(STILL_HANGING);
+    const booking = outcome as Booking;
+    expect(booking.status).toBe("confirmed");
+    expect(db.booking(booking.id)).toBeDefined();
+  });
+
+  // The starvation half. Sequential sends put the guest's copy behind the
+  // tenant's, so one stuck owner address cost the guest their confirmation
+  // entirely — not just the owner theirs.
+  it("still delivers to the guest when the tenant's address stalls", async () => {
+    db.member(TENANT_A.id, TENANT_A.owner, "owner");
+    resend.stallFor(TENANT_A.owner);
+
+    const outcome = await withPatience(createBooking(input()));
+
+    expect(outcome).not.toBe(STILL_HANGING);
+    expect(resend.recipients()).toEqual([GUEST.email]);
+    everyEmailMatchesAStoredConfirmedBooking();
+  });
+
+  // The bound is per-run, not per-recipient: three stalled addresses must not
+  // cost three timeouts in series.
+  it("bounds the whole run once, not once per stalled recipient", async () => {
+    db.member(TENANT_A.id, TENANT_A.owner, "owner");
+    db.member(TENANT_A.id, TENANT_A.admin, "admin");
+    resend.stallFor(TENANT_A.owner);
+    resend.stallFor(TENANT_A.admin);
+    resend.stallFor(GUEST.email);
+
+    const started = Date.now();
+    const outcome = await withPatience(createBooking(input()));
+    const elapsed = Date.now() - started;
+
+    expect(outcome).not.toBe(STILL_HANGING);
+    // Three sequential bounds would be >= 150ms; concurrent ones land near 50.
+    expect(elapsed).toBeLessThan(BOUND_MS * 3);
+  });
+
+  // AC3: one record, carrying the booking id, with a reason an operator can
+  // tell apart from a 422.
+  it("logs a timed-out send once, with the booking id and a distinct reason", async () => {
+    resend.stallFor(GUEST.email);
+
+    const outcome = await withPatience(createBooking(input()));
+    const booking = outcome as Booking;
+
+    const records = (errors.mock.calls as unknown[][]).filter(
+      (call) => (call[1] as { bookingId?: string })?.bookingId === booking.id,
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0]![1]).toMatchObject({
+      operation: EMAIL_OPERATION,
+      bookingId: booking.id,
+      recipient: "guest",
+      vendorCode: "timeout",
+    });
+    // Distinguishable from an ordinary vendor rejection, which carries a status.
+    expect(
+      (records[0]![1] as { vendorStatus: number | null }).vendorStatus,
+    ).toBeNull();
+  });
+
+  // A send that answers inside the bound is untouched by any of this.
+  it("accepts a slow send that still answers within the bound", async () => {
+    resend.delayFor(GUEST.email, Math.floor(BOUND_MS / 5));
+
+    const outcome = await withPatience(createBooking(input()));
+
+    expect(outcome).not.toBe(STILL_HANGING);
+    expect(resend.recipients()).toEqual([GUEST.email]);
+  });
+
+  // Rider 5. `Intl.DateTimeFormat` throws RangeError on an unrecognised zone,
+  // and `branding_json.timezone` is tenant-editable, so this is reachable from
+  // data. The entry point's contract is that it never rejects.
+  it("does not reject when the tenant's configured timezone is unusable", async () => {
+    const tenant = db.customers.find((c) => c.id === TENANT_A.id)!;
+    tenant.branding_json = { timezone: "Not/AZone" };
+
+    const booking = await createBooking(input());
+
+    expect(booking.status).toBe("confirmed");
+    // The guest is still told, in a zone the message names honestly.
+    expect(resend.recipients()).toEqual([GUEST.email]);
+    expect(resend.sent[0]!.text).toContain("(UTC)");
+  });
+
+  // Rider 3. Tenant-controlled text reaches Subject; a CR or LF there ends the
+  // header and begins one of the sender's choosing.
+  it("strips CR, LF and NUL from a Subject built out of tenant text", async () => {
+    const tenant = db.customers.find((c) => c.id === TENANT_A.id)!;
+    const CR = String.fromCharCode(13);
+    const LF = String.fromCharCode(10);
+    const NUL = String.fromCharCode(0);
+    tenant.name =
+      "Northwind" + CR + LF + "Bcc: victim@example.com" + NUL + " X";
+
+    await createBooking(input());
+
+    const subject = resend.sent[0]!.subject;
+    expect(subject).not.toMatch(
+      new RegExp("[" + CR + LF + NUL + "]"),
+    );
+    // Neutralized, not dropped: the text survives as text on one line.
+    expect(subject).toContain("Bcc: victim@example.com");
+  });
+});
