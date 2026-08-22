@@ -194,7 +194,11 @@ function formatWhen(booking: Booking, tenant: Tenant): string {
         operation: EMAIL_OPERATION,
         bookingId: booking.id,
         customerId: booking.customerId,
-        configuredTimezone: configured,
+        // Redacted like every other free text this module logs: the rule at
+        // the top of the file is that tenant-authored text is held to no
+        // schema, and a timezone field is no more trustworthy than a vendor
+        // message. Flagged by the ALI-196 security pass (observation B).
+        configuredTimezone: redactSensitive(configured),
       },
     );
     timeZone = "UTC";
