@@ -155,6 +155,22 @@ history follows them across bookings within a tenant.
   `TEST_DATABASE_URL` set (e.g. running locally with no Postgres up), those
   tests skip rather than fail — an honest skip, not a false green. See
   `supabase/README.md` for the one-command local reproduction.
+- **Layout regression tests** (`npm run test:layout`, `playwright.layout.config.ts`)
+  measure the *real* page shell in a real browser, and run on every pull
+  request. They exist because ALI-221 shipped a calendar whose day cells
+  computed to **4.28px**: two nested fixed-column grids (the flow shell's
+  `20rem` summary rail and the calendar's own `18rem` slot rail) both billed to
+  one `max-w-3xl` page, and `minmax(0,1fr)` collapsed rather than refused. That
+  is a *computed layout* failure of an ancestor chain, so it passes every test
+  that mounts a component in isolation, and every test in jsdom — which has no
+  layout engine and reports every width as 0. **A layout assertion is only
+  evidence if it is measured inside the real shell, in a browser.** The harness
+  (`e2e/layout/harness/`) stays hermetic — no server, no database, no secrets —
+  by compiling `src/app/globals.css` with the same Tailwind plugin
+  `postcss.config.mjs` names and bundling the same `TenantBookingPage` tree the
+  routes render; only two edge modules are stubbed, neither of which occupies
+  space. Related: prefer **container** queries over viewport media queries for
+  any layout decision about a box whose width an ancestor controls.
 - **Playwright** for end-to-end tests (`npm run test:e2e`), separate from the
   hermetic-database job above: the app talks to Supabase exclusively through
   PostgREST, which a bare `postgres:16` container doesn't provide, so e2e

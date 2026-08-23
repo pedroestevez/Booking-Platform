@@ -225,148 +225,179 @@ export function AvailabilityCalendar({
   }
 
   return (
-    <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_18rem]">
-      {/* Month grid */}
-      <div>
-        <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold" aria-live="polite">
-            {MONTH_AND_YEAR.format(
-              carrier({ year: visibleMonth.year, month: visibleMonth.month, day: 1 }),
-            )}
-          </h3>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => setMonthOffset((m) => m - 1)}
-              disabled={!canGoBack}
-              aria-label="Previous month"
-              className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
-            >
-              <ChevronLeft className="size-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setMonthOffset((m) => m + 1)}
-              aria-label="Next month"
-              className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-            >
-              <ChevronRight className="size-4" />
-            </button>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-7 gap-1">
-          {WEEKDAY_LABELS.map((label, i) => (
-            <div
-              key={i}
-              className="pb-1 text-center text-xs font-medium text-muted-foreground"
-              aria-hidden
-            >
-              {label}
-            </div>
-          ))}
-
-          {days.map((day) => {
-            const bookable = isDayBookable(day);
-            const inMonth = day.month === visibleMonth.month && day.year === visibleMonth.year;
-            const selected = selectedDay && sameCivilDate(day, selectedDay);
-            const isToday = sameCivilDate(day, today);
-            return (
+    /*
+     * ## Why this split is a container query and not a media query (ALI-221)
+     *
+     * This was `md:grid-cols-[minmax(0,1fr)_18rem]`, and it collapsed the month
+     * grid to 4.28px per day cell on the live site. `md:` asks how wide the
+     * *viewport* is; what decides whether a 288px slot rail fits here is how wide
+     * *this component's own box* is. Those two diverged the moment the flow shell
+     * above grew its own `20rem` summary rail at `lg:` — from then on a wider
+     * viewport meant a **narrower** calendar, and the media query was reading the
+     * number that had stopped being relevant. 320px + 288px of fixed columns were
+     * billed to the same `max-w-3xl` (768px) page, and `minmax(0,1fr)`, whose
+     * floor is zero, absorbed the shortfall silently instead of refusing.
+     *
+     * A container query cannot make that mistake: the rail appears only when the
+     * space it needs is actually here. Nobody upstream has to remember to re-tune
+     * a breakpoint when a sidebar width changes — which is the failure mode, not
+     * the 288px itself.
+     *
+     * `36rem` = 16rem calendar floor + 1.5rem gap + 18rem rail. Below it the two
+     * stack and the calendar takes the full width.
+     *
+     * The `minmax(16rem,…)` floor is the second half of the fix and is
+     * deliberately redundant: by the arithmetic above it can never bind. It is
+     * there so that if the threshold is ever wrong again the grid overflows
+     * visibly rather than quietly shrinking the cells to nothing.
+     */
+    <div className="@container">
+      <div className="grid gap-6 @min-[36rem]:grid-cols-[minmax(16rem,1fr)_18rem]">
+        {/* Month grid */}
+        <div>
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold" aria-live="polite">
+              {MONTH_AND_YEAR.format(
+                carrier({ year: visibleMonth.year, month: visibleMonth.month, day: 1 }),
+              )}
+            </h3>
+            <div className="flex items-center gap-1">
               <button
-                key={civilKeyString(day)}
                 type="button"
-                disabled={!bookable}
-                onClick={() => setSelectedDay(day)}
-                aria-label={formatCivilDate(day)}
-                aria-pressed={!!selected}
-                className={cn(
-                  "relative flex aspect-square items-center justify-center rounded-lg text-sm font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                  !inMonth && "opacity-40",
-                  bookable
-                    ? "hover:bg-accent"
-                    : "cursor-not-allowed text-muted-foreground/40 line-through",
-                  selected &&
-                    "bg-primary text-primary-foreground hover:bg-primary",
-                  !selected &&
-                    bookable &&
-                    isToday &&
-                    "ring-1 ring-inset ring-primary/40",
-                )}
+                onClick={() => setMonthOffset((m) => m - 1)}
+                disabled={!canGoBack}
+                aria-label="Previous month"
+                className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
               >
-                {day.day}
-                {bookable && !selected && (
-                  <span
-                    className="absolute bottom-1 size-1 rounded-full bg-primary/60"
-                    aria-hidden
-                  />
-                )}
+                <ChevronLeft className="size-4" />
               </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Time slots */}
-      <div className="md:border-l md:pl-6">
-        {!selectedDay ? (
-          <div className="flex h-full min-h-40 flex-col items-center justify-center rounded-lg border border-dashed text-center">
-            <p className="px-6 text-sm text-muted-foreground">
-              Select a date to see available times.
-            </p>
-          </div>
-        ) : (
-          <div>
-            <div className="mb-3 flex items-baseline justify-between">
-              <h3 className="text-sm font-semibold">
-                {SHORT_DAY.format(carrier(selectedDay))}
-              </h3>
-              <span className="text-xs text-muted-foreground">
-                {timeZone.replace(/_/g, " ")}
-              </span>
-            </div>
-
-            {slots.length === 0 ? (
-              <div className="flex min-h-40 flex-col items-center justify-center gap-2 rounded-lg border border-dashed text-center">
-                <CalendarOff className="size-5 text-muted-foreground/60" />
-                <p className="px-6 text-sm text-muted-foreground">
-                  No times left on this day. Try another date.
-                </p>
-              </div>
-            ) : (
-              <div
-                className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto pr-1 md:grid-cols-1 lg:grid-cols-2"
-                role="listbox"
-                aria-label="Available times"
+              <button
+                type="button"
+                onClick={() => setMonthOffset((m) => m + 1)}
+                aria-label="Next month"
+                className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               >
-                {slots.map((slot) => {
-                  const active =
-                    selectedSlot && selectedSlot.start === slot.start;
-                  return (
-                    <button
-                      key={slot.start}
-                      type="button"
-                      role="option"
-                      aria-selected={!!active}
-                      aria-label={formatSlotLabel(slot.start, timeZone)}
-                      onClick={() => onSelectSlot(slot)}
-                      className={cn(
-                        "rounded-lg border px-3 py-2.5 text-sm font-medium tabular-nums transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                        active
-                          ? "border-primary bg-primary text-primary-foreground"
-                          : "border-input hover:border-primary/50 hover:bg-accent",
-                      )}
-                    >
-                      {/* The business's clock — the one named above this list.
-                          Rendering the browser's would label a 9:00 AM New York
-                          slot "1:00 PM" under a UTC SSR render. */}
-                      {formatTime(slot.start, timeZone)}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+                <ChevronRight className="size-4" />
+              </button>
+            </div>
           </div>
-        )}
+
+          <div className="grid grid-cols-7 gap-1">
+            {WEEKDAY_LABELS.map((label, i) => (
+              <div
+                key={i}
+                className="pb-1 text-center text-xs font-medium text-muted-foreground"
+                aria-hidden
+              >
+                {label}
+              </div>
+            ))}
+
+            {days.map((day) => {
+              const bookable = isDayBookable(day);
+              const inMonth = day.month === visibleMonth.month && day.year === visibleMonth.year;
+              const selected = selectedDay && sameCivilDate(day, selectedDay);
+              const isToday = sameCivilDate(day, today);
+              return (
+                <button
+                  key={civilKeyString(day)}
+                  type="button"
+                  disabled={!bookable}
+                  onClick={() => setSelectedDay(day)}
+                  aria-label={formatCivilDate(day)}
+                  aria-pressed={!!selected}
+                  className={cn(
+                    "relative flex aspect-square items-center justify-center rounded-lg text-sm font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    !inMonth && "opacity-40",
+                    bookable
+                      ? "hover:bg-accent"
+                      : "cursor-not-allowed text-muted-foreground/40 line-through",
+                    selected &&
+                      "bg-primary text-primary-foreground hover:bg-primary",
+                    !selected &&
+                      bookable &&
+                      isToday &&
+                      "ring-1 ring-inset ring-primary/40",
+                  )}
+                >
+                  {day.day}
+                  {bookable && !selected && (
+                    <span
+                      className="absolute bottom-1 size-1 rounded-full bg-primary/60"
+                      aria-hidden
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Time slots */}
+        <div className="@min-[36rem]:border-l @min-[36rem]:pl-6">
+          {!selectedDay ? (
+            <div className="flex h-full min-h-40 flex-col items-center justify-center rounded-lg border border-dashed text-center">
+              <p className="px-6 text-sm text-muted-foreground">
+                Select a date to see available times.
+              </p>
+            </div>
+          ) : (
+            <div>
+              <div className="mb-3 flex items-baseline justify-between">
+                <h3 className="text-sm font-semibold">
+                  {SHORT_DAY.format(carrier(selectedDay))}
+                </h3>
+                <span className="text-xs text-muted-foreground">
+                  {timeZone.replace(/_/g, " ")}
+                </span>
+              </div>
+
+              {slots.length === 0 ? (
+                <div className="flex min-h-40 flex-col items-center justify-center gap-2 rounded-lg border border-dashed text-center">
+                  <CalendarOff className="size-5 text-muted-foreground/60" />
+                  <p className="px-6 text-sm text-muted-foreground">
+                    No times left on this day. Try another date.
+                  </p>
+                </div>
+              ) : (
+                <div
+                  /* Same reason as the split above: one column while this list is
+                     the narrow rail, two while it is stacked under the calendar
+                     with the full width. `md:`/`lg:` could not tell those apart. */
+                  className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto pr-1 @min-[36rem]:grid-cols-1"
+                  role="listbox"
+                  aria-label="Available times"
+                >
+                  {slots.map((slot) => {
+                    const active =
+                      selectedSlot && selectedSlot.start === slot.start;
+                    return (
+                      <button
+                        key={slot.start}
+                        type="button"
+                        role="option"
+                        aria-selected={!!active}
+                        aria-label={formatSlotLabel(slot.start, timeZone)}
+                        onClick={() => onSelectSlot(slot)}
+                        className={cn(
+                          "rounded-lg border px-3 py-2.5 text-sm font-medium tabular-nums transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                          active
+                            ? "border-primary bg-primary text-primary-foreground"
+                            : "border-input hover:border-primary/50 hover:bg-accent",
+                        )}
+                      >
+                        {/* The business's clock — the one named above this list.
+                            Rendering the browser's would label a 9:00 AM New York
+                            slot "1:00 PM" under a UTC SSR render. */}
+                        {formatTime(slot.start, timeZone)}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

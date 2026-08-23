@@ -7,6 +7,11 @@ name: CI
 #   3. test      — Vitest runs the unit + integration suite
 #   4. build     — `next build` compiles the whole app the way production will
 #
+# A fifth check runs alongside them in its own job: `layout` (ALI-221) measures
+# the real booking-page shell in a real browser. It is separate because it needs
+# Chromium and nothing else in `quality` does, and unconditional because the
+# regression it guards renders fine in every test that has no layout engine.
+#
 # lint/typecheck/build need no secrets: the app's pages are server-rendered on
 # demand, so the build never contacts a live database.
 #
@@ -98,6 +103,48 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  layout:
+    name: Layout regression (Playwright)
+    runs-on: ubuntu-latest
+    # Unconditional, unlike the e2e job below, and that is the whole point
+    # (ALI-221). The 4.28px day-cell collapse was a *computed layout* failure of
+    # an ancestor chain — the flow shell's 20rem rail and the calendar's own
+    # 18rem rail both billed to one 768px page — so it rendered correctly in
+    # every isolated component test and in jsdom, which has no layout engine at
+    # all. Catching it needs a real browser measuring the real shell.
+    #
+    # This suite needs no server, no database and no secrets: it compiles the
+    # app's own stylesheet and bundles its own page-shell component tree into a
+    # file:// page (see `e2e/layout/harness/build.ts`). A layout guard that only
+    # runs when a Supabase preview happens to be configured is a layout guard
+    # that lets the regression ship.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run layout regression tests
+        run: npm run test:layout
+
+      - name: Upload Playwright report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: layout-playwright-report
+          path: playwright-report/
+          retention-days: 7
 
   e2e:
     name: End-to-end (Playwright)
