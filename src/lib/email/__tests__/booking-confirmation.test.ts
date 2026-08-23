@@ -6,10 +6,13 @@ import { createBooking } from "@/lib/bookings";
 import {
   EMAIL_OPERATION,
   escapeHtml,
+  looksLikeEmailAddress,
   redactSensitive,
   resolveTenantRecipients,
   sendBookingConfirmation,
 } from "@/lib/email/booking-confirmation";
+import { getTenantNotificationEmail } from "@/lib/tenants";
+import { mapTenant } from "@/lib/supabase/rows";
 import {
   EmailNotConfiguredError,
   createResendProvider,
@@ -127,6 +130,15 @@ class FakeDatabase {
     const t = (this as unknown as Record<string, Row[]>)[name];
     if (!Array.isArray(t)) throw new Error(`fake: unknown table "${name}"`);
     return t;
+  }
+
+  /** ALI-224: set (or clear) a tenant's `branding_json.notification_email`. */
+  notifies(customerId: string, email: string | null): void {
+    const row = this.customers.find((c) => c.id === customerId)!;
+    const branding = { ...(row.branding_json as Record<string, unknown>) };
+    if (email === null) delete branding.notification_email;
+    else branding.notification_email = email;
+    row.branding_json = branding;
   }
 
   member(customerId: string, email: string, role: string): void {
@@ -1030,5 +1042,280 @@ describe("ALI-196 — a stuck vendor cannot hold a booking's request open", () =
     );
     // Neutralized, not dropped: the text survives as text on one line.
     expect(subject).toContain("Bcc: victim@example.com");
+  });
+});
+
+// ── ALI-224 ──────────────────────────────────────────────────────────────────
+/**
+ * The owner's copy, addressed from the tenant's own row.
+ *
+ * The gap this closes was not a broken send path — ALI-69's path was already
+ * verified end-to-end. It was that `tenant_members` is an *auth* mapping, Clerk
+ * is deferred, and the live tenant therefore had zero rows: every booking took
+ * the "no owner or admin address" warning branch and only the guest was ever
+ * emailed. So the negative case below (`no notification_email set`) is not a
+ * formality — it is a description of production before this change, and it has
+ * to keep passing unchanged.
+ */
+describe("ALI-224 — branding_json.notification_email gets the owner's copy", () => {
+  const NOTIFY = "aligncompass@example.test";
+
+  // ── AC1, positive ──────────────────────────────────────────────────────────
+  it("emails the notification address alongside the guest, with no member row", async () => {
+    db.notifies(TENANT_A.id, NOTIFY);
+
+    await createBooking(input());
+
+    expect(resend.recipients().sort()).toEqual([NOTIFY, GUEST.email].sort());
+    everyEmailMatchesAStoredConfirmedBooking();
+  });
+
+  it("does not warn about a missing owner once a notification address exists", async () => {
+    db.notifies(TENANT_A.id, NOTIFY);
+
+    await createBooking(input());
+
+    expect(warnings).not.toHaveBeenCalled();
+  });
+
+  it("sends it as separate messages, never one message with two addresses", async () => {
+    db.notifies(TENANT_A.id, NOTIFY);
+
+    await createBooking(input());
+
+    for (const payload of resend.sent) expect(payload.to).not.toContain(",");
+    const guestMessage = resend.sent.find((p) => p.to === GUEST.email)!;
+    expect(guestMessage.text).not.toContain(NOTIFY);
+    expect(guestMessage.html).not.toContain(NOTIFY);
+  });
+
+  it("sends the owner-facing copy, not a second guest copy", async () => {
+    db.notifies(TENANT_A.id, NOTIFY);
+
+    await createBooking(input());
+
+    const owner = resend.sent.find((p) => p.to === NOTIFY)!;
+    // The owner render leads with who booked what; the guest render opens "Hi".
+    expect(owner.subject).toContain("New booking");
+    expect(owner.text).toContain(`${GUEST.name} booked`);
+    expect(owner.text).toContain(GUEST.email);
+    expect(owner.text).not.toMatch(/^Hi /);
+    // And it carries the same invite, so the appointment is one click away.
+    expect(owner.attachments).toHaveLength(1);
+  });
+
+  it("carries the same booking's invite as the guest's copy", async () => {
+    db.notifies(TENANT_A.id, NOTIFY);
+
+    const booking = await createBooking(input());
+    const ownerIndex = resend.sent.findIndex((p) => p.to === NOTIFY);
+    const guestIndex = resend.sent.findIndex((p) => p.to === GUEST.email);
+
+    expect(icsField(decodedInvite(ownerIndex), "UID")).toContain(booking.id);
+    expect(decodedInvite(ownerIndex)).toBe(decodedInvite(guestIndex));
+  });
+
+  // ── AC1, negative — production before this change ──────────────────────────
+  it("behaves exactly as before when no notification_email is set", async () => {
+    const booking = await createBooking(input());
+
+    expect(resend.recipients()).toEqual([GUEST.email]);
+    // The pre-existing warning, unchanged in kind: one record, naming the fix.
+    expect(warnings).toHaveBeenCalledTimes(1);
+    const [message, payload] = warnings.mock.calls[0] as [string, Row];
+    expect(message).toContain(booking.id);
+    expect(payload).toMatchObject({
+      tenantRecipients: 0,
+      notificationRecipient: false,
+    });
+    // No send was attempted for an address that does not exist.
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  it("makes no extra send for a tenant whose branding_json is empty of it", async () => {
+    db.notifies(TENANT_A.id, null);
+    db.member(TENANT_A.id, TENANT_A.owner, "owner");
+
+    await createBooking(input());
+
+    expect(resend.recipients().sort()).toEqual(
+      [TENANT_A.owner, GUEST.email].sort(),
+    );
+  });
+
+  // ── One copy per human ─────────────────────────────────────────────────────
+  it("de-duplicates against a tenant_members row holding the same address", async () => {
+    db.member(TENANT_A.id, TENANT_A.owner, "owner");
+    db.notifies(TENANT_A.id, TENANT_A.owner);
+
+    await createBooking(input());
+
+    expect(
+      resend.recipients().filter((r) => r.toLowerCase() === TENANT_A.owner),
+    ).toHaveLength(1);
+    expect(resend.recipients()).toHaveLength(2);
+  });
+
+  it("de-duplicates case-insensitively", async () => {
+    db.member(TENANT_A.id, TENANT_A.owner, "owner");
+    db.notifies(TENANT_A.id, TENANT_A.owner.toUpperCase());
+
+    await createBooking(input());
+
+    expect(resend.recipients()).toHaveLength(2);
+  });
+
+  it("still sends to both when they are genuinely different people", async () => {
+    db.member(TENANT_A.id, TENANT_A.owner, "owner");
+    db.notifies(TENANT_A.id, NOTIFY);
+
+    await createBooking(input());
+
+    expect(resend.recipients().sort()).toEqual(
+      [TENANT_A.owner, NOTIFY, GUEST.email].sort(),
+    );
+  });
+
+  // ── AC3 — a failed owner copy costs only itself ────────────────────────────
+  it("logs a refused notification send with the booking id, and keeps the rest", async () => {
+    db.notifies(TENANT_A.id, NOTIFY);
+    resend.rejectFor(NOTIFY, RESEND_REJECTIONS.rateLimited);
+
+    const booking = await createBooking(input());
+
+    // The booking is stored and returned normally — nothing rolled back.
+    expect(booking.status).toBe("confirmed");
+    expect(db.booking(booking.id)!.status).toBe("confirmed");
+    // The guest still got theirs.
+    expect(resend.recipients()).toEqual([GUEST.email]);
+
+    expect(errors).toHaveBeenCalledTimes(1);
+    const [message, payload] = errors.mock.calls[0] as [string, Row];
+    expect(message).toContain(booking.id);
+    expect(payload).toMatchObject({
+      operation: EMAIL_OPERATION,
+      bookingId: booking.id,
+      customerId: TENANT_A.id,
+      recipient: "notification",
+      vendorStatus: 429,
+      vendorCode: RESEND_REJECTIONS.rateLimited.name,
+    });
+  });
+
+  // This is the failure the issue's own note predicts: `onboarding@resend.dev`
+  // is unverified, so Resend refuses every address that is not the account's
+  // own. It must be visible in the log and cost nothing else.
+  it("survives the unverified-sender rejection the live config will produce", async () => {
+    db.notifies(TENANT_A.id, NOTIFY);
+    resend.rejectFor(NOTIFY, RESEND_REJECTIONS.validation);
+
+    const booking = await createBooking(input());
+
+    expect(booking.status).toBe("confirmed");
+    expect(resend.recipients()).toEqual([GUEST.email]);
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect((errors.mock.calls[0] as [string, Row])[0]).toContain(booking.id);
+  });
+
+  it("never puts the notification address in the log", async () => {
+    db.notifies(TENANT_A.id, NOTIFY);
+    resend.rejectFor(NOTIFY, {
+      message: `Invalid \`to\` field: ${NOTIFY} is not permitted`,
+      name: "validation_error",
+      statusCode: 422,
+    });
+
+    await createBooking(input());
+
+    expect(JSON.stringify(errors.mock.calls)).not.toContain(NOTIFY);
+    expect(JSON.stringify(errors.mock.calls)).toContain("[redacted-email]");
+  });
+
+  // ── Tenant-editable config held to no schema ───────────────────────────────
+  it("refuses an unusable notification_email, logs it, and sends nothing to it", async () => {
+    db.notifies(TENANT_A.id, "not-an-address");
+
+    const booking = await createBooking(input());
+
+    expect(resend.recipients()).toEqual([GUEST.email]);
+    expect(errors).toHaveBeenCalledTimes(1);
+    const [message, payload] = errors.mock.calls[0] as [string, Row];
+    expect(message).toContain(booking.id);
+    expect(message).toContain("notification_email");
+    expect(payload).toMatchObject({
+      bookingId: booking.id,
+      customerId: TENANT_A.id,
+      recipient: "notification",
+    });
+  });
+
+  it("treats a whitespace-only notification_email as unset", async () => {
+    db.notifies(TENANT_A.id, "   ");
+
+    await createBooking(input());
+
+    expect(resend.recipients()).toEqual([GUEST.email]);
+    // Unset, not misconfigured: the warning branch, not the error branch.
+    expect(errors).not.toHaveBeenCalled();
+    expect(warnings).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["a plain address", "owner@example.com", true],
+    ["a subdomain", "owner@mail.example.co.uk", true],
+    ["a plus tag", "owner+bookings@example.com", true],
+    ["no @", "example.com", false],
+    ["no dot in the domain", "owner@localhost", false],
+    ["an embedded space", "owner @example.com", false],
+    ["a bare @", "@example.com", false],
+    ["two addresses", "a@example.com,b@example.com", false],
+  ])("validates %s", (_label, value, expected) => {
+    expect(looksLikeEmailAddress(value)).toBe(expected);
+  });
+
+  // ── Cross-tenant ───────────────────────────────────────────────────────────
+  it("never sends tenant A's booking to tenant B's notification address", async () => {
+    const rivalNotify = "ops@rival.test";
+    db.notifies(TENANT_B.id, rivalNotify);
+
+    await createBooking(input());
+
+    expect(resend.recipients()).not.toContain(rivalNotify);
+    expect(JSON.stringify(resend.sent)).not.toContain(rivalNotify);
+  });
+
+  it("reads the address from the booking's own tenant", async () => {
+    db.notifies(TENANT_A.id, NOTIFY);
+    db.notifies(TENANT_B.id, "ops@rival.test");
+
+    await expect(getTenantNotificationEmail(TENANT_A.id)).resolves.toBe(NOTIFY);
+    await expect(getTenantNotificationEmail(TENANT_B.id)).resolves.toBe(
+      "ops@rival.test",
+    );
+  });
+
+  // ── The address must never reach a browser ─────────────────────────────────
+  /**
+   * `TenantBookingPage` hands the mapped `Tenant` to `BookingFlow`, a Client
+   * Component, so every field on `branding` is serialized into the page each
+   * visitor downloads. `contactEmail` is on that type deliberately — it is
+   * published to guests. An operations address is the opposite, and the only
+   * thing keeping it out is that `mapTenant` does not copy it across.
+   */
+  it("keeps notification_email out of the browser-facing Tenant", async () => {
+    const mapped = mapTenant({
+      id: TENANT_A.id,
+      name: TENANT_A.name,
+      slug: TENANT_A.slug,
+      branding_json: {
+        timezone: "UTC",
+        contactEmail: "hello@northwind.test",
+        notification_email: NOTIFY,
+      },
+      custom_domain: null,
+    });
+
+    expect(mapped.branding.contactEmail).toBe("hello@northwind.test");
+    expect(JSON.stringify(mapped)).not.toContain(NOTIFY);
   });
 });

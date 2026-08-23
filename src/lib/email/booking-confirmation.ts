@@ -9,7 +9,7 @@ import {
 } from "@/lib/email/provider";
 import { buildIcs, icsFilename, icsUid } from "@/lib/ics";
 import { createTenantScopedClient } from "@/lib/supabase/server";
-import { getTenantById } from "@/lib/tenants";
+import { getTenantById, getTenantNotificationEmail } from "@/lib/tenants";
 import type { Booking, GuestDetails, Tenant } from "@/lib/types";
 
 /**
@@ -40,12 +40,25 @@ import type { Booking, GuestDetails, Tenant } from "@/lib/types";
  * ## Recipients come from the booking's own tenant, never from configuration
  *
  * The guest is `input.guest.email`. The tenant side is `tenant_members.email`
- * for `role in ('owner','admin')`, scoped by the booking's `customer_id` —
- * which is both the only tenant-side address the schema holds (`customers` has
- * no email column) and the CLAUDE.md defense-in-depth filter. There is no
- * fallback address: not an env var, not a hardcoded one. An env var holding one
- * person's address is customer data hardcoded into the platform, and it breaks
- * the moment there is a second tenant.
+ * for `role in ('owner','admin')`, scoped by the booking's `customer_id` — the
+ * CLAUDE.md defense-in-depth filter — **plus**, since ALI-224, the tenant's own
+ * `branding_json.notification_email` when it has one set.
+ *
+ * That second source does not weaken the rule this paragraph used to state. The
+ * rule is that there is no *fallback* address: not an env var, not a hardcoded
+ * one, because an env var holding one person's address is customer data baked
+ * into the platform and it breaks the moment there is a second tenant.
+ * `notification_email` is neither — it lives on the tenant's own row, so tenant
+ * #2 gets its own or gets none.
+ *
+ * It exists because `tenant_members` is an **auth** mapping: every row carries a
+ * Clerk `auth_subject`, so it is really "people who can sign in to this tenant",
+ * and ALI-224 recorded the decision to defer Clerk (ALI-62). Requiring a member
+ * row in order to be told about a booking therefore couples *who gets notified*
+ * to a sign-in system that does not exist yet — which is exactly why the live
+ * tenant had zero owner notifications: not a broken send path, an empty
+ * `tenant_members` table. Both sources are read, unioned and de-duplicated
+ * case-insensitively, so an address held both ways still gets exactly one copy.
  *
  * Guest and tenant get **separate sends**. One message with both addresses in
  * `to` would disclose each party's address to the other and would make a single
@@ -64,8 +77,15 @@ import type { Booking, GuestDetails, Tenant } from "@/lib/types";
 /** Names this module's records in the log. */
 export const EMAIL_OPERATION = "booking-confirmation-email";
 
-/** Which side of the booking a send was addressed to. */
-export type RecipientRole = "tenant" | "guest";
+/**
+ * Which side of the booking a send was addressed to.
+ *
+ * `notification` is distinct from `tenant` on purpose (ALI-224): both are
+ * owner-facing copies of the same message, but they come from different places
+ * — `tenant_members` rows versus one `branding_json` key — and when one fails,
+ * the log has to say which, because the fix is different.
+ */
+export type RecipientRole = "tenant" | "guest" | "notification";
 
 /** Why a run sent nothing, when it sent nothing. */
 export type SkipReason =
@@ -168,6 +188,70 @@ export async function resolveTenantRecipients(
     addresses.push(email);
   }
   return addresses;
+}
+
+/**
+ * Does this look enough like an address to be worth a send?
+ *
+ * Deliberately permissive — the vendor is the real validator, and duplicating
+ * its rules here would only produce a second, subtly different answer. This
+ * exists for one narrow purpose: `notification_email` is tenant-editable config
+ * held to no schema (the same category as `branding_json.timezone`, which threw
+ * a `RangeError` out of this module in ALI-196), so a typo'd value would
+ * otherwise buy one guaranteed vendor rejection on *every* booking, forever,
+ * logged as a send failure rather than as the configuration error it is.
+ */
+export function looksLikeEmailAddress(value: string): boolean {
+  return /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/.test(value);
+}
+
+/**
+ * The tenant's configured notification address, when it has a usable one that
+ * is not already covered by a `tenant_members` row (ALI-224).
+ *
+ * Never throws: a failed lookup is logged and treated as "no address", because
+ * this runs inside a function whose whole contract is that a notification
+ * problem cannot cost the guest their confirmation.
+ */
+async function resolveNotificationRecipient(
+  booking: Booking,
+  alreadyAddressed: string[],
+): Promise<string | null> {
+  let configured: string | null;
+  try {
+    configured = await getTenantNotificationEmail(booking.customerId);
+  } catch (err) {
+    logSendFailure(booking, "notification", err);
+    return null;
+  }
+
+  if (!configured) return null;
+
+  if (!looksLikeEmailAddress(configured)) {
+    console.error(
+      `[${EMAIL_OPERATION}] tenant ${booking.customerId} has an unusable ` +
+        `branding_json.notification_email, so no owner copy of booking ` +
+        `${booking.id} was sent. Fix the value; the booking is stored and the ` +
+        "guest was still emailed.",
+      {
+        operation: EMAIL_OPERATION,
+        bookingId: booking.id,
+        customerId: booking.customerId,
+        recipient: "notification",
+        // Redacted for the same reason every other tenant-authored string in
+        // this module is: it is an address, and addresses do not reach the log.
+        configuredNotificationEmail: redactSensitive(configured),
+      },
+    );
+    return null;
+  }
+
+  // One copy per human, not one per source. A tenant that both has an owner
+  // `tenant_members` row and names the same address here gets a single email.
+  const covered = new Set(alreadyAddressed.map((a) => a.toLowerCase()));
+  if (covered.has(configured.toLowerCase())) return null;
+
+  return configured;
 }
 
 /**
@@ -411,21 +495,31 @@ export async function sendBookingConfirmation(
     logSendFailure(booking, "tenant", err);
   }
 
-  if (tenantRecipients.length === 0) {
-    // AC3's specified state, and today's production reality until a
-    // `tenant_members` row exists for the tenant. Deliberately legible: this is
-    // the line that explains why an owner did not hear about a booking.
+  // ALI-224. Resolved after the member lookup because it de-duplicates against
+  // it, and never throws — an owner copy is the thing this whole block is for,
+  // but it is still a side effect of a booking that is already stored.
+  const notificationRecipient = await resolveNotificationRecipient(
+    booking,
+    tenantRecipients,
+  );
+
+  if (tenantRecipients.length === 0 && !notificationRecipient) {
+    // AC3's specified state, and it was production reality until ALI-224: the
+    // live tenant had zero `tenant_members` rows, so this line — not a broken
+    // send — is why the owner never heard about a booking. Deliberately
+    // legible, and now it names both ways to fix it.
     console.warn(
       `[${EMAIL_OPERATION}] no owner or admin address for tenant ` +
         `${booking.customerId}, so nobody was notified of booking ` +
-        `${booking.id}. Add a tenant_members row with role 'owner' or 'admin' ` +
-        "and the address that should receive booking notifications. The " +
+        `${booking.id}. Set branding_json.notification_email on the customers ` +
+        "row, or add a tenant_members row with role 'owner' or 'admin'. The " +
         "booking is stored and the guest was still emailed.",
       {
         operation: EMAIL_OPERATION,
         bookingId: booking.id,
         customerId: booking.customerId,
         tenantRecipients: 0,
+        notificationRecipient: false,
       },
     );
   }
@@ -471,6 +565,16 @@ export async function sendBookingConfirmation(
     ...tenantRecipients.map((address) =>
       deliver(address, "tenant", tenantEmail),
     ),
+    // The owner copy rides this same run rather than waiting on the guest's
+    // send to resolve first. ALI-224 AC1 reads "when a booking's confirmation
+    // send succeeds", and gating on that literally would mean Pedro hears about
+    // *fewer* bookings precisely when delivery is broken — the opposite of what
+    // an owner notification is for. It is one more isolated recipient on the
+    // already-verified path, which is also what keeps the ALI-196 bound
+    // per-run rather than per-recipient.
+    ...(notificationRecipient
+      ? [deliver(notificationRecipient, "notification", tenantEmail)]
+      : []),
     deliver(input.guest.email, "guest", guestEmail),
   ]);
 

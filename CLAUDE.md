@@ -51,6 +51,17 @@ per-tenant fork.
   (migration `0004`) — `auth_subject` (Clerk user id) → `customer_id`.
 - **The booking flow itself has no end-user auth.** Guests are identified by
   email through `end_customers` (see data model below), not by signing in.
+- **`tenant_members` is an auth mapping, so it must not be the only way to be
+  told about a booking (ALI-224).** Every row carries a Clerk `auth_subject`,
+  which makes the table "people who can sign in to this tenant" — and with Clerk
+  deferred, the live tenant had zero rows, so zero owner notifications ever
+  sent while the send path itself was working. The tenant-side recipient set is
+  therefore the union of `tenant_members` (`owner`/`admin`) and the tenant's own
+  `branding_json.notification_email`, de-duplicated case-insensitively. That is
+  not a fallback address — a fallback in env or code is customer data baked into
+  the platform and breaks at tenant #2; this lives on the tenant's own row.
+  **Never put an operations address on `TenantBranding`**: that type crosses to
+  a Client Component, so anything on it ships to every visitor's browser.
 - Auth is **decoupled from Row Level Security**, and still is. The app never
   passes an *end-user* JWT to PostgREST — Clerk's token never reaches the
   database. What it does pass is a token the **server** mints for itself.
@@ -85,7 +96,7 @@ tables, built up across migrations `0001`–`0005`:
 
 | Table | Purpose |
 | --- | --- |
-| `customers` | The tenant. `slug` addresses the booking page at `/<slug>`. `branding_json` holds white-label config (brand color, tagline, currency, timezone). Also carries `stripe_account_id`, `stripe_charges_enabled`, `platform_fee_bps` for Stripe Connect (migration `0005`). |
+| `customers` | The tenant. `slug` addresses the booking page at `/<slug>`. `branding_json` holds white-label config (brand color, tagline, currency, timezone, and the optional `notification_email` — ALI-224). Also carries `stripe_account_id`, `stripe_charges_enabled`, `platform_fee_bps` for Stripe Connect (migration `0005`). |
 | `services` | `id, customer_id, name, description, duration_minutes, price_cents, active`. |
 | `availability_rules` | Weekly recurring open hours: `id, customer_id, day_of_week, start_time, end_time, buffer_minutes`. Concrete bookable slots are derived from these minus `blocked_slots` and existing `bookings`. |
 | `end_customers` | The guest as a **reusable identity**, unique per tenant by email (`unique (customer_id, email)`) so repeat bookings resolve to the same person. `resolve_or_create_end_customer()` (migration `0003`) does the atomic lookup-or-insert. |
