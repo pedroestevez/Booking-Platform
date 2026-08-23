@@ -17,6 +17,9 @@ const isLocal = /(?:127\.0\.0\.1|localhost)/.test(BASE_URL);
 
 export default defineConfig({
   testDir: "./e2e",
+  // The layout suite (ALI-221) has its own config: it needs no server and must
+  // run unconditionally. See `playwright.layout.config.ts`.
+  testIgnore: "layout/**",
   fullyParallel: true,
   // Never let a stray `.only` silently shrink the suite in CI.
   forbidOnly: Boolean(process.env.CI),
