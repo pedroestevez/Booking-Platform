@@ -30,6 +30,21 @@ export interface TenantBranding {
   contactEmail?: string;
 }
 
+/**
+ * `branding_json` holds one key that is deliberately **not** on
+ * `TenantBranding`: `notification_email` (ALI-224), the address a tenant wants
+ * its own copy of every booking notification at.
+ *
+ * The omission is the point. `TenantBranding` is reached by
+ * `TenantBookingPage` → `BookingFlow`, a Client Component, so every field on it
+ * is serialized into the page each visitor downloads. `contactEmail` belongs
+ * there — it is published to guests on purpose. An operations address does not,
+ * so it is read server-side only, at the moment a notification is addressed:
+ * `getTenantNotificationEmail` in `@/lib/tenants`.
+ *
+ * Adding it here would ship it to every browser. Don't.
+ */
+
 /** A bookable business (maps to `customers`). */
 export interface Tenant {
   id: string;

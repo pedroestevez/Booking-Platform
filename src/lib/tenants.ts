@@ -132,6 +132,48 @@ export async function getTenantTimeZone(customerId: string): Promise<string> {
   return mapTenant(data).branding.timezone;
 }
 
+/**
+ * The address a tenant wants its own copy of every booking notification at —
+ * `branding_json.notification_email` (ALI-224) — or `null` when unset.
+ *
+ * **Why this is a separate read and not a field on `TenantBranding`.**
+ * `mapTenant` produces the `Tenant` that `TenantBookingPage` hands down to
+ * `BookingFlow`, a Client Component — so every field on `branding` is
+ * serialized into the RSC payload of the page *every visitor downloads*.
+ * `contactEmail` lives there deliberately: it is published to guests, and the
+ * confirmation screen renders it. An operations address is the opposite kind of
+ * value, so it never joins that type; it is read here, server-side, only at the
+ * moment a notification is being addressed. Same shape as `getTenantTimeZone`
+ * above, for a different reason.
+ *
+ * Returns `null` rather than throwing for a tenant that has not set one: an
+ * unset key is the common case and the specified negative case (ALI-224 AC1),
+ * not an error. Whether the value *looks like* an address is decided by the
+ * caller that is about to send to it, where the booking id is in scope for the
+ * log — see `sendBookingConfirmation`.
+ *
+ * Scoped by the tenant's own id in app code as well as through the
+ * tenant-scoped client, matching every other read in this file.
+ */
+export async function getTenantNotificationEmail(
+  customerId: string,
+): Promise<string | null> {
+  const supabase = createTenantScopedClient(customerId);
+  const { data, error } = await supabase
+    .from("customers")
+    .select("id, name, slug, branding_json, custom_domain")
+    .eq("id", customerId)
+    .maybeSingle<CustomerRow>();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  const configured = data.branding_json?.notification_email;
+  if (typeof configured !== "string") return null;
+  const trimmed = configured.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 export async function getActiveServices(customerId: string): Promise<Service[]> {
   const supabase = createTenantScopedClient(customerId);
   const { data, error } = await supabase

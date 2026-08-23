@@ -41,6 +41,21 @@ import type { Booking, Tenant } from "@/lib/types";
  * Two of its claims were not covered by the builder's own suite and are the
  * reason this file earns its place rather than being folded into it:
  * "criterion 3 (rejection path)" and "invariant: ... throws synchronously".
+ *
+ * ## ALI-224 — one more wire-shape reconciliation, and what it exposed
+ *
+ * Adding `branding_json.notification_email` turned criterion 3 red, in both
+ * directions, and the cause was this file's own `@/lib/tenants` mock rather
+ * than anything the seat claimed: the factory listed `getTenantById` only, so
+ * the new `getTenantNotificationEmail` resolved to `undefined`, calling it threw
+ * a `TypeError`, and `sendBookingConfirmation` correctly logged that as a
+ * failed notification — a second record where criterion 3 asserts exactly one.
+ *
+ * The assertions are untouched. Only the mock gained the member it was always
+ * missing. Worth recording rather than fixing silently: a module mock that
+ * enumerates exports is a promise about a module's shape that nothing checks,
+ * so it goes stale the moment the module grows — and it fails as a *behavioural*
+ * assertion ("two log records") rather than as the missing-stub error it is.
  */
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -48,8 +63,12 @@ vi.mock("@/lib/supabase/server", () => ({
   createTenantScopedClient: vi.fn(),
 }));
 
+// `getTenantNotificationEmail` is mocked to `null` — this suite's tenant has no
+// `branding_json.notification_email`, which is what its recipient assertions
+// have always assumed. See the ALI-224 note in the reconciliation record above.
 vi.mock("@/lib/tenants", () => ({
   getTenantById: vi.fn(),
+  getTenantNotificationEmail: vi.fn(async () => null),
 }));
 
 vi.mock("@/lib/email/provider", async (importOriginal) => ({
