@@ -39,7 +39,7 @@ export default async function CustomerSlugPage({ params }: PageProps) {
   // ALI-211: once a tenant has its own custom domain, the `/<slug>` URL is a
   // permanent redirect to `/` — but ONLY when the request actually arrived on
   // THAT tenant's own domain. `tenant.customDomain` being set is a fact about
-  // the tenant, not about this request: `booking.aligncompass.com/<slug>`
+  // the tenant, not about this request: `<platform-host>/<slug>`
   // must keep working exactly as it does today for a tenant that also has a
   // custom domain, so the redirect is host-scoped, comparing the resolved
   // request host against `tenant.customDomain` rather than acting on

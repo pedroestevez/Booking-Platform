@@ -23,6 +23,9 @@ function stubHeaders(entries: Record<string, string>): void {
 
 afterEach(() => {
   vi.clearAllMocks();
+  // `isPlatformSharedHost` reads `PLATFORM_HOSTS` per call, so a stub left
+  // standing would leak into the next test rather than being harmlessly stale.
+  vi.unstubAllEnvs();
 });
 
 describe("resolveRequestHost", () => {
@@ -75,12 +78,14 @@ describe("resolveRequestHost", () => {
 });
 
 describe("isPlatformSharedHost", () => {
+  // The two structural hosts hold with no configuration at all — that is what
+  // makes them structural, and why `PLATFORM_HOSTS` is left unset here.
   it.each([
-    ["the shared production host", "booking.aligncompass.com"],
     ["localhost", "localhost"],
     ["a Vercel preview deployment host", "booking-platform-git-main-foo.vercel.app"],
     ["a bare .vercel.app host", "foo.vercel.app"],
-  ])("is true for %s", (_label, host) => {
+  ])("is true for %s with no PLATFORM_HOSTS set", (_label, host) => {
+    vi.stubEnv("PLATFORM_HOSTS", "");
     expect(isPlatformSharedHost(host)).toBe(true);
   });
 
@@ -89,8 +94,57 @@ describe("isPlatformSharedHost", () => {
     ["an unrelated host", "example.com"],
     // Not a suffix match to a real platform host — proves the check isn't
     // accidentally satisfied by string containment.
-    ["a lookalike host", "notbooking.aligncompass.com.evil.example"],
+    ["a lookalike host", "notbook.platform.example.com.evil.example"],
   ])("is false for %s", (_label, host) => {
+    vi.stubEnv("PLATFORM_HOSTS", "");
     expect(isPlatformSharedHost(host)).toBe(false);
+  });
+
+  // ── The configured host (ALI-211 follow-up) ────────────────────────────────
+  // The deployment's own production domain is configuration, not a constant.
+  // These are the cases a hard-coded literal used to cover for free, and the
+  // ones a misread of the variable would silently break.
+
+  it("is true for a host named in PLATFORM_HOSTS", () => {
+    vi.stubEnv("PLATFORM_HOSTS", "booking.platform.example");
+    expect(isPlatformSharedHost("booking.platform.example")).toBe(true);
+  });
+
+  it("is false for that same host once PLATFORM_HOSTS no longer names it", () => {
+    // Read per call, never captured at import: a value frozen at module load
+    // is one a redeploy cannot correct.
+    vi.stubEnv("PLATFORM_HOSTS", "");
+    expect(isPlatformSharedHost("booking.platform.example")).toBe(false);
+  });
+
+  it("accepts several hosts, so a deployment can move domains", () => {
+    vi.stubEnv("PLATFORM_HOSTS", "old.platform.example,new.platform.example");
+    expect(isPlatformSharedHost("old.platform.example")).toBe(true);
+    expect(isPlatformSharedHost("new.platform.example")).toBe(true);
+  });
+
+  it.each([
+    ["surrounding whitespace", " booking.platform.example , other.example "],
+    ["an uppercase spelling", "Booking.Platform.Example"],
+    ["a trailing root-label dot", "booking.platform.example."],
+    ["a port", "booking.platform.example:443"],
+  ])("normalizes %s, matching how the request host is normalized", (_label, configured) => {
+    // `resolveRequestHost` lowercases and strips port/trailing dot, so a
+    // configured value spelled any of these ways must still match. A missed
+    // match here is silent: the platform's own host starts being treated as a
+    // tenant domain and every request costs a pointless database round trip.
+    vi.stubEnv("PLATFORM_HOSTS", configured);
+    expect(isPlatformSharedHost("booking.platform.example")).toBe(true);
+  });
+
+  it("ignores empty entries rather than matching the empty host", () => {
+    vi.stubEnv("PLATFORM_HOSTS", ",, ,");
+    expect(isPlatformSharedHost("")).toBe(false);
+    expect(isPlatformSharedHost("localhost")).toBe(true);
+  });
+
+  it("never lets configuration turn a tenant's domain into a platform host by suffix", () => {
+    vi.stubEnv("PLATFORM_HOSTS", "platform.example");
+    expect(isPlatformSharedHost("tenant.platform.example")).toBe(false);
   });
 });

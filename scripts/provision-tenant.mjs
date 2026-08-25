@@ -459,7 +459,7 @@ async function buildSpec(flags) {
 // ── Validation ───────────────────────────────────────────────────────────────
 
 /**
- * A slug is a public URL segment (`booking.aligncompass.com/<slug>`), so this
+ * A slug is a public URL segment (`<platform-host>/<slug>`), so this
  * is stricter than the column, which is merely `text not null unique`. A slug
  * containing `/`, whitespace or uppercase would resolve to a route nobody can
  * link to — better rejected here than provisioned and discovered later.
@@ -478,14 +478,25 @@ const CUSTOM_DOMAIN_PATTERN =
 
 /**
  * Mirrors `isPlatformSharedHost` in `src/lib/request-host.ts` and migration
- * 0008's `customers_custom_domain_not_platform_host` check constraint. This
+ * 0011's `customers_custom_domain_not_platform_host` check constraint. This
  * script is plain Node/`pg`, not the Next app, so it cannot import the
- * TypeScript source — keep this list in sync with both by hand. Rejected here
+ * TypeScript source — keep this rule in sync with both by hand. Rejected here
  * for a clear CLI error; the DB constraint is the backstop if this script is
  * ever bypassed.
+ *
+ * Reads `PLATFORM_HOSTS` from the same environment the app does, so running
+ * this script against a deployment checks that deployment's real hosts. The
+ * DB constraint can only enforce the two structural rules (`localhost`,
+ * `*.vercel.app`) — a configured host is known to the app, not to Postgres —
+ * which is exactly why this check runs here as well.
  */
 function isPlatformSharedHost(host) {
-  return host === "booking.aligncompass.com" || host === "localhost" || host.endsWith(".vercel.app");
+  const configured = (process.env.PLATFORM_HOSTS ?? "")
+    .split(",")
+    .map((entry) => entry.trim().replace(/:\d+$/, "").replace(/\.$/, "").toLowerCase())
+    .filter(Boolean);
+
+  return host === "localhost" || configured.includes(host) || host.endsWith(".vercel.app");
 }
 
 /** `HH:MM` or `HH:MM:SS`, 24h. Matches what `time` accepts and the UI renders. */
@@ -547,7 +558,8 @@ function validateSpec(spec) {
     if (isPlatformSharedHost(spec.customDomain)) {
       throw new SpecError(
         `customDomain cannot be one of the platform's own hosts ` +
-          `(booking.aligncompass.com, localhost, or any *.vercel.app host) — ` +
+          `(localhost, any *.vercel.app host, or anything named in ` +
+          `PLATFORM_HOSTS) — ` +
           `got: ${spec.customDomain}. The app never resolves a tenant for ` +
           `these hosts, so this tenant's booking page would become ` +
           `unreachable via both the slug route and the shared host.`,

@@ -3,7 +3,7 @@
 -- ║                                                                            ║
 -- ║ Lets a tenant be resolved by HTTP Host instead of only by `/<slug>`, so    ║
 -- ║ `booking.pedroestevez.com/` renders that tenant directly — no slug in the  ║
--- ║ URL — while `booking.aligncompass.com/<slug>` is completely unaffected.    ║
+-- ║ URL — while `<platform-host>/<slug>` is completely unaffected.             ║
 -- ║ This migration adds the column and its constraints ONLY; the read path     ║
 -- ║ (`getTenantByHost`) and page wiring live in application code, and no admin ║
 -- ║ UI writes this column yet (that is ALI-212, domain ownership verification, ║
@@ -41,7 +41,7 @@
 --      partial unique index can actually enforce uniqueness of the HOST, not
 --      merely of one spelling of it.
 --   3. NEVER A PLATFORM HOST. `src/lib/request-host.ts`'s `isPlatformSharedHost`
---      treats `booking.aligncompass.com`, `localhost`, and every `*.vercel.app`
+--      treats `localhost`, any `PLATFORM_HOSTS` entry, and every `*.vercel.app`
 --      host as never a tenant's `custom_domain` — `getTenantByHost` is never
 --      even called for those hosts, `/` skips straight to the shared landing
 --      page. If one of them were EVER stored here anyway (this column has no
@@ -127,8 +127,7 @@ begin
         check (
           custom_domain is null
           or (
-            custom_domain <> 'booking.aligncompass.com'
-            and custom_domain <> 'localhost'
+            custom_domain <> 'localhost'
             and custom_domain not like '%.vercel.app'
           )
         );
@@ -185,7 +184,7 @@ begin
   ) then
     raise exception
       '0008: check constraint customers_custom_domain_not_platform_host is '
-      'missing. Without it, a value like booking.aligncompass.com or a '
+      'missing. Without it, a value like localhost or a '
       '*.vercel.app host could be stored, silently making that tenant '
       'unreachable via BOTH the slug route (permanently-redirects to /) and '
       'the shared host (never resolves a tenant to redirect to).';

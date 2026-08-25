@@ -1058,7 +1058,7 @@ describe("ALI-196 — a stuck vendor cannot hold a booking's request open", () =
  * to keep passing unchanged.
  */
 describe("ALI-224 — branding_json.notification_email gets the owner's copy", () => {
-  const NOTIFY = "aligncompass@example.test";
+  const NOTIFY = "platform@example.test";
 
   // ── AC1, positive ──────────────────────────────────────────────────────────
   it("emails the notification address alongside the guest, with no member row", async () => {

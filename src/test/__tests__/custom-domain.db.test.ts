@@ -17,7 +17,7 @@ import { hasTestDatabase, withRollback } from "@/test/supabase-harness";
  * the constraint itself.
  *
  * A third property, added after review: `custom_domain` must never equal one
- * of the platform's own hosts (`booking.aligncompass.com`, `localhost`, any
+ * of the platform's own hosts (`booking-platform.vercel.app`, `localhost`, any
  * `*.vercel.app`) — `isPlatformSharedHost` in `src/lib/request-host.ts` treats
  * those as never a tenant's domain and skips `getTenantByHost` for them
  * entirely, so a row that slipped past validation and claimed one would
@@ -37,7 +37,7 @@ import { hasTestDatabase, withRollback } from "@/test/supabase-harness";
  *     "rejects two customers sharing one custom_domain" expects to fail
  *     instead succeeded, turning that test red.
  *   - Without `customers_custom_domain_not_platform_host`: the
- *     `booking.aligncompass.com` insert below succeeded instead of failing.
+ *     `booking-platform.vercel.app` insert below succeeded instead of failing.
  *
  * Skips (does not fail) when `TEST_DATABASE_URL` is unset — see the harness
  * docstring.
@@ -111,7 +111,7 @@ describe.skipIf(!hasTestDatabase)("customers.custom_domain (migration 0008)", ()
         db.query(
           `insert into public.customers (name, slug, custom_domain)
            values ($1, $2, $3)`,
-          ["Hijack Attempt", "custom-domain-fixture-6", "booking.aligncompass.com"],
+          ["Hijack Attempt", "custom-domain-fixture-6", "booking-platform.vercel.app"],
         ),
       ).rejects.toMatchObject({ code: SQLSTATE_CHECK_VIOLATION } satisfies PgError);
     });

@@ -32,7 +32,7 @@ vi.mock("@/lib/tenants", () => ({
   getAllTenants: vi.fn(),
   // ALI-211: `/` now also resolves a tenant by request host. These tests are
   // about the ALI-176 tenant-enumeration gate, not host resolution, so every
-  // render below uses `booking.aligncompass.com` — a platform-shared host
+  // render below uses `booking-platform.vercel.app` — a platform-shared host
   // (`isPlatformSharedHost`) — which must short-circuit BEFORE this is ever
   // called. Left unmocked-to-resolve (never given a return value) so a
   // regression that removed that short-circuit fails loudly instead of this
@@ -73,7 +73,7 @@ const LEAKY_TENANT: Tenant = {
  */
 async function renderRoot(
   nodeEnv: string,
-  host = "booking.aligncompass.com",
+  host = "booking-platform.vercel.app",
 ): Promise<string> {
   vi.stubEnv("NODE_ENV", nodeEnv);
   vi.mocked(getAllTenants).mockResolvedValue([LEAKY_TENANT]);

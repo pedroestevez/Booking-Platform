@@ -112,7 +112,7 @@ describe("the platform root — custom-domain tenant resolution", () => {
   });
 
   it("does not query the database for the platform's own shared host", async () => {
-    stubHost("booking.aligncompass.com");
+    stubHost("booking-platform.vercel.app");
     vi.stubEnv("NODE_ENV", "production");
 
     const { default: HomePage } = await import("@/app/page");
@@ -138,12 +138,12 @@ describe("the platform root — custom-domain tenant resolution", () => {
     expect(getActiveServices).not.toHaveBeenCalled();
   });
 
-  it("never redirects or renders a tenant for booking.aligncompass.com/<slug> traffic (host, not path, decides)", async () => {
+  it("never redirects or renders a tenant for booking-platform.vercel.app/<slug> traffic (host, not path, decides)", async () => {
     // This suite only exercises `/`; the point recorded here is the contract
-    // `isPlatformSharedHost` exists to hold — `booking.aligncompass.com` is
+    // `isPlatformSharedHost` exists to hold — `booking-platform.vercel.app` is
     // never treated as anyone's `custom_domain`, no matter what a tenant row
     // says, because it's a platform host, not a customer's own domain.
-    stubHost("booking.aligncompass.com");
+    stubHost("booking-platform.vercel.app");
     vi.stubEnv("NODE_ENV", "production");
 
     const { default: HomePage } = await import("@/app/page");
@@ -174,7 +174,7 @@ describe("the platform root — generateMetadata", () => {
   });
 
   it("returns default metadata for the platform's shared host, with no query", async () => {
-    stubHost("booking.aligncompass.com");
+    stubHost("booking-platform.vercel.app");
 
     const { generateMetadata } = await import("@/app/page");
     const metadata = await generateMetadata();

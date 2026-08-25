@@ -23,6 +23,16 @@ interface BookingConfirmationProps {
    * otherwise inherit a screen implying somebody was notified when nobody was.
    * The booking commits either way (ALI-69 AC6) — this decides only whether
    * the screen is allowed to imply a message went out.
+   *
+   * Scoped to the GUEST's copy on purpose, and that is what the enabled branch
+   * claims. The guest is emailed whenever the provider is configured, full
+   * stop. The **tenant-side** copy is not equivalent: its recipients are the
+   * union of `tenant_members` and `branding_json.notification_email`
+   * (ALI-224), which a tenant can leave empty — and a screen telling the guest
+   * "we've let them know" would then be the exact false reassurance this prop
+   * exists to prevent. Saying so would need a server-resolved boolean passed
+   * down from the caller; it must never be inferred from this flag, and the
+   * recipient addresses themselves must never reach this Client Component.
    */
   notificationsEnabled: boolean;
   onBookAnother: () => void;
@@ -127,9 +137,19 @@ export function BookingConfirmation({
         Add to calendar
       </Button>
       {notificationsEnabled ? (
-        <p className="mt-2 text-xs text-muted-foreground">
-          Online payment arrives in an upcoming release.
-        </p>
+        <div className="mt-4 rounded-xl border border-dashed bg-muted/30 p-4 text-left">
+          <p className="flex items-center gap-2 text-sm font-medium">
+            <Mail aria-hidden="true" className="size-4 shrink-0" />
+            A confirmation is on its way to {guest.email}.
+          </p>
+          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+            It carries the same calendar invite as the button above, so one of
+            the two is enough — take whichever is easier.
+          </p>
+          <p className="mt-3 text-xs text-muted-foreground">
+            Online payment arrives in an upcoming release.
+          </p>
+        </div>
       ) : (
         <div className="mt-4 rounded-xl border border-dashed bg-muted/30 p-4 text-left">
           <p className="flex items-center gap-2 text-sm font-medium">
