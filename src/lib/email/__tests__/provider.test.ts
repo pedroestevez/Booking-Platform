@@ -274,7 +274,7 @@ describe("formatFrom", () => {
 describe("senderAddress", () => {
   it("takes the bare address either way it is configured", () => {
     expect(senderAddress(FROM)).toBe(FROM);
-    expect(senderAddress(`AlignCompass <${FROM}>`)).toBe(FROM);
+    expect(senderAddress(`Bookings <${FROM}>`)).toBe(FROM);
   });
 });
 

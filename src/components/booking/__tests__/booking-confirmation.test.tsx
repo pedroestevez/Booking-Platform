@@ -13,7 +13,7 @@ import type { GuestDetails, Service, Tenant, TimeSlot } from "@/lib/types";
  *
  * With no `RESEND_API_KEY`, `createBooking` catches `EmailNotConfiguredError`,
  * commits the booking anyway, and shows this screen (ALI-69 AC6). That is the
- * deployed state of `booking.aligncompass.com` today — so the one sentence a
+ * deployed state of `booking-platform.vercel.app` today — so the one sentence a
  * guest reads after booking is the entire notification story, and until now it
  * said only that email "arrives in an upcoming release" beneath a heading that
  * reads "You're booked in!".

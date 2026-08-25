@@ -29,7 +29,7 @@ export const dynamic = "force-dynamic";
 /**
  * ALI-211: a tenant on its own custom domain gets the slug route's metadata
  * (same title/description shape) with no `/<slug>` in the URL. The platform's
- * own hosts (`booking.aligncompass.com`, `*.vercel.app`, `localhost`) never
+ * own hosts (anything in `PLATFORM_HOSTS`, `*.vercel.app`, `localhost`) never
  * reach `getTenantByHost` — `isPlatformSharedHost` short-circuits first, so
  * there is no query and this falls through to Next's default metadata, same
  * as before this feature existed.

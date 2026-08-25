@@ -53,15 +53,50 @@ export async function resolveRequestHost(): Promise<string | null> {
  * the platform's own hosts are never a tenant's `custom_domain` — that would
  * be requiring a customer to prove ownership of infrastructure they don't
  * control (ALI-212, domain ownership verification, precludes it either way).
+ *
+ * Two of the three are *structural* and hard-coded because they are true of
+ * any deployment of this app: `localhost` for local dev, and `*.vercel.app`
+ * for every preview and deployment URL the host assigns.
+ *
+ * The third — the deployment's own production domain — is **configuration,
+ * not a constant.** A literal here bakes one particular deployment's domain
+ * into code every deployment shares, so a fork, a rename, or a second
+ * environment silently carries a hostname it does not own, and the value
+ * cannot be corrected without a code change and a redeploy. It is read from
+ * `PLATFORM_HOSTS` instead (comma-separated, so a deployment migrating
+ * between domains can name both while DNS moves).
+ *
+ * Unset is a valid and complete configuration: a deployment reachable only at
+ * its `*.vercel.app` URL is already fully covered by the structural rule.
  */
-export const PLATFORM_SHARED_HOSTS = new Set(["booking.aligncompass.com", "localhost"]);
+export function platformSharedHosts(): Set<string> {
+  const configured = (process.env.PLATFORM_HOSTS ?? "")
+    .split(",")
+    // Normalized exactly as `resolveRequestHost` normalizes the request's own
+    // host, so the two are compared on equal terms — a stray capital, port or
+    // trailing dot in the environment must not turn into a missed match.
+    .map((entry) =>
+      entry
+        .trim()
+        .replace(/:\d+$/, "")
+        .replace(/\.$/, "")
+        .toLowerCase(),
+    )
+    .filter(Boolean);
+
+  return new Set(["localhost", ...configured]);
+}
 
 /**
- * True for the platform's own hosts: the production shared host, any Vercel
- * preview/deployment host (`*.vercel.app`), and `localhost` for local dev.
- * `host` must already be normalized (see `resolveRequestHost`) — this does no
- * normalization of its own.
+ * True for the platform's own hosts: any host named in `PLATFORM_HOSTS`, any
+ * Vercel preview/deployment host (`*.vercel.app`), and `localhost` for local
+ * dev. `host` must already be normalized (see `resolveRequestHost`) — this
+ * does no normalization of its own.
+ *
+ * Read per call rather than captured at module load: the set is derived from
+ * the environment, and a value frozen at import is a value a test cannot
+ * change and a runtime cannot correct.
  */
 export function isPlatformSharedHost(host: string): boolean {
-  return PLATFORM_SHARED_HOSTS.has(host) || host.endsWith(".vercel.app");
+  return platformSharedHosts().has(host) || host.endsWith(".vercel.app");
 }

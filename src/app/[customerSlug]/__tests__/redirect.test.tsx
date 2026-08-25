@@ -14,7 +14,7 @@ import type { Tenant } from "@/lib/types";
 /**
  * `/<slug>` permanently redirects to `/` once a tenant has a custom domain —
  * but ONLY for a request that arrived ON that tenant's own domain (ALI-211).
- * `booking.aligncompass.com/<slug>` must never redirect, even for a tenant
+ * `booking-platform.vercel.app/<slug>` must never redirect, even for a tenant
  * that also has a `customDomain` set: the redirect is host-scoped, comparing
  * the RESOLVED REQUEST HOST against `tenant.customDomain`, never acting on
  * `tenant.customDomain`'s mere presence.
@@ -29,7 +29,7 @@ import type { Tenant } from "@/lib/types";
  *
  * Making the redirect unconditional on host — i.e. `if (tenant.customDomain)
  * permanentRedirect("/")` with the host comparison deleted — turned "does NOT
- * redirect booking.aligncompass.com/<slug>" red: the mocked
+ * redirect booking-platform.vercel.app/<slug>" red: the mocked
  * `permanentRedirect` fired where the test requires it not to.
  */
 
@@ -123,8 +123,8 @@ describe("/<slug> — host-scoped redirect to the tenant's custom domain", () =>
     expect(getActiveServices).not.toHaveBeenCalled();
   });
 
-  it("does NOT redirect booking.aligncompass.com/<slug>, even though the tenant has a customDomain set", async () => {
-    stubHost("booking.aligncompass.com");
+  it("does NOT redirect booking-platform.vercel.app/<slug>, even though the tenant has a customDomain set", async () => {
+    stubHost("booking-platform.vercel.app");
     vi.mocked(getTenantBySlug).mockResolvedValue(TENANT_WITH_CUSTOM_DOMAIN);
     mockReads();
 
@@ -135,7 +135,7 @@ describe("/<slug> — host-scoped redirect to the tenant's custom domain", () =>
   });
 
   it("does not redirect a tenant with no customDomain, regardless of host", async () => {
-    stubHost("booking.aligncompass.com");
+    stubHost("booking-platform.vercel.app");
     vi.mocked(getTenantBySlug).mockResolvedValue(TENANT_WITHOUT_CUSTOM_DOMAIN);
     mockReads();
 
@@ -155,7 +155,7 @@ describe("/<slug> — host-scoped redirect to the tenant's custom domain", () =>
   });
 
   it("still 404s an unknown slug, unaffected by the redirect logic", async () => {
-    stubHost("booking.aligncompass.com");
+    stubHost("booking-platform.vercel.app");
     vi.mocked(getTenantBySlug).mockResolvedValue(null);
 
     await expect(renderSlugPage("no-such-tenant")).rejects.toThrow("NEXT_NOT_FOUND");
