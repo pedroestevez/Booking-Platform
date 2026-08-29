@@ -462,7 +462,7 @@ describe.skipIf(!hasTestDatabase)("provision-tenant.mjs", () => {
 
   it("refuses to create a non-draft tenant from the draft catalogue", async () => {
     // The S4 scenario exactly: a new tenant, a name, and a forgotten --service.
-    // Inheriting the draft would give them two active `price_cents = 0`
+    // Inheriting the draft would give them active `price_cents = 0`
     // services — which, since criterion 4, book as `confirmed` — on a calendar
     // nobody configured.
     const result = await run(

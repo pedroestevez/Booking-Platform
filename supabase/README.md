@@ -132,7 +132,6 @@ node scripts/provision-tenant.mjs --confirm \
   --slug pedroestevez --name 'Pedro Estevez' \
   --timezone America/New_York --currency USD \
   --service 'Interview — 30 min|30|0' \
-  --service 'Intro consultation — 30 min|30|0' \
   --rule '1-5|10:00|18:00|15'
 
 node scripts/provision-tenant.mjs --help     # full flag list

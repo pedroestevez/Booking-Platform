@@ -74,7 +74,7 @@
 //     invocation was previously a complete, valid production write (S4).
 //   • Creating a tenant under a slug other than the draft's requires explicit
 //     `--service` and `--rule`. Otherwise `--slug acme --name 'Acme Legal'`
-//     silently gave Acme Pedro's two free services — which, since a
+//     silently gave Acme Pedro's free services — which, since a
 //     `price_cents = 0` service now books as `confirmed`, means anyone reaching
 //     `/acme` could confirm slots on a calendar nobody meant to publish.
 //
@@ -120,7 +120,7 @@ const CONNECTION_VARIABLE = "PROVISION_DATABASE_URL";
  * fields are drafts the P4 table does not itself state, and are flagged on
  * ALI-176 rather than guessed silently:
  *   • `name`     — the display name behind slug `pedroestevez`.
- *   • `currency` — P4 lists a timezone but no currency. Both services are free,
+ *   • `currency` — P4 lists a timezone but no currency. The service is free,
  *                  so nothing formats a non-zero amount with it today.
  * `brandColor` matches `mapTenant`'s own fallback in `src/lib/supabase/rows.ts`,
  * so provisioning writes exactly what the app would have defaulted to.
@@ -149,13 +149,10 @@ const DRAFT_SPEC = {
       priceCents: 0,
       active: true,
     },
-    {
-      name: "Intro consultation — 30 min",
-      description: "A 30-minute introductory consultation.",
-      durationMinutes: 30,
-      priceCents: 0,
-      active: true,
-    },
+    // "Intro consultation — 30 min" was removed 2026-08-29 (Pedro's call):
+    // the tenant is a hiring surface, and a consultation offering reads as
+    // consulting for hire. The live row gets deactivated, not deleted; absent
+    // from this list, the provisioner leaves it alone rather than re-activating.
   ],
   // Mon–Fri 10:00–18:00, buffer 15. One row per day: `availability_rules` has
   // no day-range column.
@@ -959,7 +956,7 @@ async function convergeAvailabilityRules(client, customerId, rules) {
  * Creating a tenant under a slug other than the draft's must not inherit the
  * draft's catalogue (S4).
  *
- * `--slug acme --name 'Acme Legal'` used to give Acme Pedro's two services.
+ * `--slug acme --name 'Acme Legal'` used to give Acme Pedro's services.
  * They are `active` and `price_cents = 0`, and a free service now books as
  * `confirmed`, so anyone reaching `/acme` could confirm slots on a calendar
  * nobody meant to publish — and, once ALI-69 lands, trigger a confirmation
